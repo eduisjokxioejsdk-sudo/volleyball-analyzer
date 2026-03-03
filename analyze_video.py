@@ -484,7 +484,7 @@ class VolleyballAnalyzer:
 
         return self.rallies
 
-    def _deduplicate_serves(self, raw_serves, min_gap_seconds=12.0):
+    def _deduplicate_serves(self, raw_serves, min_gap_seconds=6.0):
         """
         Fusionne les services détectés trop proches les uns des autres.
         
@@ -528,12 +528,10 @@ class VolleyballAnalyzer:
             # Fin du point : service suivant - 10 secondes
             if i + 1 < len(serves):
                 next_serve_frame = serves[i + 1]['frame']
-                rally_end_frame = max(rally_start_frame + int(self.fps * MIN_RALLY_SECONDS),
-                                      next_serve_frame - int(self.fps * 10))
+                rally_end_frame = next_serve_frame - int(self.fps * 10)
             else:
                 # Dernier point : fin vidéo - 10s ou fin vidéo
-                rally_end_frame = max(rally_start_frame + int(self.fps * MIN_RALLY_SECONDS),
-                                      self.total_frames - int(self.fps * 10))
+                rally_end_frame = self.total_frames - int(self.fps * 10)
                 if rally_end_frame <= rally_start_frame:
                     rally_end_frame = self.total_frames
 
