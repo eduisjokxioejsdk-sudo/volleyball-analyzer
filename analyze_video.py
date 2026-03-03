@@ -482,18 +482,32 @@ class VolleyballAnalyzer:
         return self.rallies
 
     def _rally_detection_from_serves(self, serves):
-        """Détecte les rallyes en se basant sur les services."""
+        """
+        Détecte les rallyes en se basant sur les services.
+        
+        Logique :
+        - Début du point = service détecté - 2 secondes
+        - Fin du point   = service SUIVANT - 10 secondes
+        - Dernier point  = dernier service - 2s → fin vidéo - 10s (ou fin vidéo)
+        """
         for i, serve in enumerate(serves):
-            rally_start_frame = max(0, serve['frame'] - int(self.fps * 1))  # 1s avant le service
+            # Début du point : service actuel - 2 secondes
+            rally_start_frame = max(0, serve['frame'] - int(self.fps * 2))
 
-            # Trouver la fin du rallye : prochain service OU période d'inactivité
+            # Fin du point : service suivant - 10 secondes
             if i + 1 < len(serves):
                 next_serve_frame = serves[i + 1]['frame']
+                rally_end_frame = max(rally_start_frame + int(self.fps * MIN_RALLY_SECONDS),
+                                      next_serve_frame - int(self.fps * 10))
             else:
-                next_serve_frame = self.total_frames
+                # Dernier point : fin vidéo - 10s ou fin vidéo
+                rally_end_frame = max(rally_start_frame + int(self.fps * MIN_RALLY_SECONDS),
+                                      self.total_frames - int(self.fps * 10))
+                if rally_end_frame <= rally_start_frame:
+                    rally_end_frame = self.total_frames
 
-            # Chercher la fin du rallye par inactivité
-            rally_end_frame = self._find_rally_end(serve['frame'], next_serve_frame)
+            # S'assurer qu'on ne dépasse pas les bornes
+            rally_end_frame = min(rally_end_frame, self.total_frames)
 
             # Vérifier la durée minimale
             min_rally_frames = int(MIN_RALLY_SECONDS * self.fps)
