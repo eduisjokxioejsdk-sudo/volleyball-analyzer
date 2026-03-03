@@ -56,7 +56,7 @@ EVENT_THRESHOLD = 3             # Nb de détections nécessaires pour déclarer 
 
 # Paramètres de découpage des rallyes
 INACTIVITY_SECONDS = 3.0        # Secondes sans action = fin du rallye
-MIN_RALLY_SECONDS = 2.0         # Durée minimale d'un rallye valide
+MIN_RALLY_SECONDS = 3.0         # Durée minimale d'un rallye valide (ignore les faux services)
 MAX_GAP_BEFORE_SERVE = 5.0      # Secondes max avant un service pour chercher le début
 
 # Paramètres de scoring
@@ -460,10 +460,13 @@ class VolleyballAnalyzer:
         # ======================================================================
         # Méthode 1: Basée sur les services détectés
         # ======================================================================
-        serves = [e for e in self.events if e['action'] == 'serve']
+        raw_serves = [e for e in self.events if e['action'] == 'serve']
+
+        # Dédupliquer les services trop proches (même service détecté plusieurs fois)
+        serves = self._deduplicate_serves(raw_serves)
 
         if serves:
-            print(f"   🎾 {len(serves)} services détectés - découpage basé sur les services")
+            print(f"   🎾 {len(raw_serves)} services bruts → {len(serves)} services uniques (après déduplication)")
             self._rally_detection_from_serves(serves)
         else:
             print(f"   ⚠️ Aucun service détecté - découpage basé sur les périodes d'activité")
@@ -480,6 +483,34 @@ class VolleyballAnalyzer:
         print(f"   🔄 Passeur {self.team_right}: {state['setter_positions'][self.team_right]}")
 
         return self.rallies
+
+    def _deduplicate_serves(self, raw_serves, min_gap_seconds=12.0):
+        """
+        Fusionne les services détectés trop proches les uns des autres.
+        
+        Si deux services sont à moins de min_gap_seconds l'un de l'autre,
+        on ne garde que le premier (c'est probablement le même service
+        détecté plusieurs fois par l'IA).
+        
+        Un vrai point de volleyball dure au minimum ~5-6 secondes
+        (service + réception + attaque), donc 12s de gap minimum est safe.
+        """
+        if not raw_serves:
+            return []
+        
+        deduplicated = [raw_serves[0]]
+        
+        for serve in raw_serves[1:]:
+            last_serve = deduplicated[-1]
+            gap_seconds = (serve['frame'] - last_serve['frame']) / self.fps if self.fps > 0 else 999
+            
+            if gap_seconds >= min_gap_seconds:
+                deduplicated.append(serve)
+            else:
+                # Service trop proche du précédent → on l'ignore (doublon)
+                pass
+        
+        return deduplicated
 
     def _rally_detection_from_serves(self, serves):
         """
