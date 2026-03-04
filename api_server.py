@@ -103,23 +103,31 @@ def run_analysis(analysis_id, video_path, params):
         )
 
         analyses[analysis_id]['progress'] = 'Detection des actions...'
-        analyses[analysis_id]['percent'] = 15
-        update_supabase_video(video_id, "PROCESSING", 15)
-        analyzer.detect_actions()
+        analyses[analysis_id]['percent'] = 5
+        update_supabase_video(video_id, "PROCESSING", 5)
+
+        # Real progress callback: detect_actions progress (0-100) → global 5-85%
+        def on_detect_progress(frame_percent):
+            global_percent = 5 + int(frame_percent * 0.80)  # 5% + 80% of total
+            analyses[analysis_id]['percent'] = global_percent
+            analyses[analysis_id]['progress'] = f'Detection des actions... {frame_percent}%'
+            update_supabase_video(video_id, "PROCESSING", global_percent)
+
+        analyzer.detect_actions(progress_callback=on_detect_progress)
 
         analyses[analysis_id]['progress'] = 'Detection des evenements...'
-        analyses[analysis_id]['percent'] = 60
-        update_supabase_video(video_id, "PROCESSING", 60)
+        analyses[analysis_id]['percent'] = 87
+        update_supabase_video(video_id, "PROCESSING", 87)
         analyzer.detect_events()
 
         analyses[analysis_id]['progress'] = 'Decoupage des rallyes...'
-        analyses[analysis_id]['percent'] = 80
-        update_supabase_video(video_id, "PROCESSING", 80)
+        analyses[analysis_id]['percent'] = 92
+        update_supabase_video(video_id, "PROCESSING", 92)
         analyzer.detect_rallies()
 
         analyses[analysis_id]['progress'] = 'Export des resultats...'
-        analyses[analysis_id]['percent'] = 90
-        update_supabase_video(video_id, "PROCESSING", 90)
+        analyses[analysis_id]['percent'] = 96
+        update_supabase_video(video_id, "PROCESSING", 96)
         analyzer.export_results()
 
         # Lire le JSON

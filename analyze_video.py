@@ -278,8 +278,12 @@ class VolleyballAnalyzer:
     # Phase 1: Détection des actions avec frame skipping
     # ==========================================================================
 
-    def detect_actions(self):
-        """Parcourt la vidéo et détecte les actions (avec frame skipping)."""
+    def detect_actions(self, progress_callback=None):
+        """Parcourt la vidéo et détecte les actions (avec frame skipping).
+        
+        Args:
+            progress_callback: callable(percent: int) called with real progress 0-100
+        """
         print(f"\n🔍 Phase 1: Détection des actions (1 frame sur {self.frame_skip})...")
 
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -291,6 +295,7 @@ class VolleyballAnalyzer:
 
         frame_num = 0
         analyzed_count = 0
+        last_reported_percent = -1
         while self.cap.isOpened():
             ret, frame = self.cap.read()
             if not ret:
@@ -339,6 +344,16 @@ class VolleyballAnalyzer:
 
                 analyzed_count += 1
                 pbar.update(1)
+
+                # Report real progress via callback (every 2%)
+                if progress_callback and self.analyzed_frames_count > 0:
+                    percent = int((analyzed_count / self.analyzed_frames_count) * 100)
+                    if percent != last_reported_percent and percent % 2 == 0:
+                        last_reported_percent = percent
+                        try:
+                            progress_callback(percent)
+                        except Exception:
+                            pass
 
             frame_num += 1
 
