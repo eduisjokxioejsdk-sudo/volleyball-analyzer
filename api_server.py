@@ -166,7 +166,7 @@ def run_analysis(analysis_id, video_path, params):
             try: os.remove(video_path)
             except: pass
 
-    except Exception as e:
+    except BaseException as e:
         analyses[analysis_id]['status'] = 'error'
         analyses[analysis_id]['error'] = str(e)
         analyses[analysis_id]['percent'] = 0
@@ -187,10 +187,17 @@ def _position_to_number(pos_str):
 @app.route('/health', methods=['GET'])
 @app.route('/api/health', methods=['GET'])
 def health():
+    import analyze_video as av
+    actions_exists = os.path.exists(av.ACTIONS_MODEL_PATH)
+    actions_size = os.path.getsize(av.ACTIONS_MODEL_PATH) if actions_exists else 0
     return jsonify({
         'status': 'ok',
         'service': 'CourtVision YOLO Volleyball Analyzer',
         'supabase_connected': supabase_client is not None,
+        'model_actions_path': av.ACTIONS_MODEL_PATH,
+        'model_actions_exists': actions_exists,
+        'model_actions_size_mb': round(actions_size / (1024*1024), 1),
+        'volleyvision_dir': av.VOLLEYVISION_DIR,
     })
 
 

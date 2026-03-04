@@ -220,10 +220,10 @@ class VolleyballAnalyzer:
 
         # Vérifier que les poids existent
         if not os.path.exists(ACTIONS_MODEL_PATH):
-            print(f"❌ Erreur: Modèle non trouvé à: {ACTIONS_MODEL_PATH}")
-            print(f"   Assurez-vous d'avoir cloné VolleyVision dans: {VOLLEYVISION_DIR}")
-            print(f"   git clone https://github.com/shukkkur/VolleyVision.git")
-            sys.exit(1)
+            raise FileNotFoundError(
+                f"Modèle non trouvé à: {ACTIONS_MODEL_PATH}. "
+                f"Assurez-vous d'avoir cloné VolleyVision dans: {VOLLEYVISION_DIR}"
+            )
 
         print(f"📦 Chargement du modèle d'actions: {os.path.basename(ACTIONS_MODEL_PATH)}")
         print(f"   (YOLOv8m local - pas d'API RoboFlow)")
