@@ -246,8 +246,7 @@ class VolleyballAnalyzer:
         """Ouvre la vidéo et récupère ses propriétés."""
         self.cap = cv2.VideoCapture(self.video_path)
         if not self.cap.isOpened():
-            print(f"❌ Erreur: Impossible d'ouvrir la vidéo: {self.video_path}")
-            sys.exit(1)
+            raise RuntimeError(f"Impossible d'ouvrir la vidéo: {self.video_path}")
 
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))

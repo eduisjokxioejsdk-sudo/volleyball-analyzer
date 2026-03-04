@@ -77,15 +77,35 @@ def download_video(url, dest_path):
     return dest_path
 
 
-def run_analysis(analysis_id, video_path, params):
+def run_analysis(analysis_id, video_path_or_url, params):
     """Lance une analyse en arrière-plan et met à jour Supabase."""
     video_id = params.get('video_id')  # ID de la vidéo dans Supabase
+    video_path = video_path_or_url
     
     try:
+        # Si c'est une URL, télécharger dans le thread (ne bloque pas le request handler)
+        if isinstance(video_path_or_url, str) and video_path_or_url.startswith('http'):
+            analyses[analysis_id]['status'] = 'downloading'
+            analyses[analysis_id]['progress'] = 'Téléchargement de la vidéo...'
+            analyses[analysis_id]['percent'] = 1
+            update_supabase_video(video_id, "PROCESSING", 1)
+            
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            ext = video_path_or_url.split('?')[0].split('.')[-1][:4] or 'mp4'
+            video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}.{ext}")
+            try:
+                download_video(video_path_or_url, video_path)
+            except Exception as e:
+                update_supabase_video(video_id, "ERROR", 0)
+                analyses[analysis_id]['status'] = 'error'
+                analyses[analysis_id]['error'] = f'Download failed: {e}'
+                print(f"❌ Download error: {e}")
+                return
+        
         analyses[analysis_id]['status'] = 'running'
         analyses[analysis_id]['progress'] = 'Chargement du modèle...'
-        analyses[analysis_id]['percent'] = 5
-        update_supabase_video(video_id, "PROCESSING", 5)
+        analyses[analysis_id]['percent'] = 3
+        update_supabase_video(video_id, "PROCESSING", 3)
 
         output_dir = os.path.join(OUTPUT_DIR, analysis_id)
 
@@ -227,16 +247,8 @@ def start_analysis():
         data = request.get_json() or {}
         video_url = data.get('video_url')
         if video_url:
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            ext = video_url.split('?')[0].split('.')[-1][:4] or 'mp4'
-            video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}.{ext}")
-            try:
-                download_video(video_url, video_path)
-            except Exception as e:
-                # Mettre à jour Supabase avec erreur si on a le video_id
-                video_id = data.get('video_id')
-                update_supabase_video(video_id, "ERROR", 0)
-                return jsonify({'error': f'Impossible de telecharger la video: {e}'}), 400
+            # Pass URL directly — download will happen in the background thread
+            video_path = video_url
         elif data.get('video_path') and os.path.exists(data['video_path']):
             video_path = data['video_path']
         params = {
