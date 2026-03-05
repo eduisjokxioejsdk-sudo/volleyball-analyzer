@@ -290,6 +290,36 @@ def get_analysis(analysis_id):
     return jsonify(resp)
 
 
+@app.route('/api/analyses', methods=['GET'])
+def list_analyses():
+    """Debug: lister toutes les analyses en mémoire."""
+    return jsonify({
+        'count': len(analyses),
+        'analyses': [
+            {
+                'id': a['id'],
+                'status': a['status'],
+                'progress': a['progress'],
+                'percent': a.get('percent', 0),
+                'error': a.get('error'),
+            }
+            for a in analyses.values()
+        ]
+    })
+
+
+@app.route('/api/test-supabase/<video_id>', methods=['POST'])
+def test_supabase(video_id):
+    """Debug: tester la mise à jour Supabase directement."""
+    if not supabase_client:
+        return jsonify({'error': 'Supabase non connecté'}), 500
+    try:
+        result = supabase_client.table("videos").update({"progress": 1}).eq("id", video_id).execute()
+        return jsonify({'success': True, 'data': str(result.data), 'count': len(result.data) if result.data else 0})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
