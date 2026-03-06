@@ -487,6 +487,22 @@ class VolleyballAnalyzer:
             print(f"   ⚠️ Aucun service détecté - découpage basé sur les périodes d'activité")
             self._rally_detection_from_activity()
 
+        # ======================================================================
+        # Filtre : supprimer les points qui ne contiennent pas au moins 1 service
+        # (ex: joueur qui se prépare à servir mais ne sert pas encore)
+        # ======================================================================
+        before_filter = len(self.rallies)
+        self.rallies = [
+            r for r in self.rallies
+            if any(e['action'] == 'serve' for e in r['events'])
+        ]
+        filtered_out = before_filter - len(self.rallies)
+        if filtered_out > 0:
+            print(f"   🗑️  {filtered_out} faux points supprimés (pas de service détecté)")
+            # Renuméroter les rallyes
+            for idx, r in enumerate(self.rallies):
+                r['rally_num'] = idx + 1
+
         # Attribution du score + rotations
         self._attribute_scores_and_rotations()
 
@@ -585,6 +601,9 @@ class VolleyballAnalyzer:
             # Si pas de gap trouvé, utiliser la dernière frame active
             if rally_end_frame is None:
                 rally_end_frame = last_active_frame
+
+            # Ajouter 1.5s de buffer après la dernière action (évite coupure trop sèche)
+            rally_end_frame = rally_end_frame + int(self.fps * 1.5)
 
             # Ne pas dépasser le service suivant ni la fin de vidéo
             rally_end_frame = min(rally_end_frame, next_serve_frame - 1, self.total_frames)
