@@ -531,46 +531,65 @@ class VolleyballAnalyzer:
         """
         Détecte les rallyes en se basant sur les services.
         
-        Logique :
-        - Début du point = service détecté - 2 secondes
-        - Fin du point   = dernière action YOLO avant le service suivant + 4 secondes
-        - Dernier point  = dernière action après le dernier service + 4 secondes
+        Logique améliorée :
+        - Début du point = frame du service
+        - Fin du point   = premier GAP d'inactivité (3s sans détection YOLO)
+        
+        Cela évite d'inclure les temps morts (célébrations, marche, etc.)
+        qui sont souvent détectés comme des fausses actions par YOLO.
         """
-        BUFFER_AFTER_LAST_ACTION = 0.0  # pas de buffer après la dernière action
+        # Gap d'inactivité qui marque la fin du rallye (en secondes)
+        INACTIVITY_GAP = 3.0
+        # Nombre minimum de détections pour qu'une frame "compte" comme active
+        # (filtre le bruit : 1 détection isolée = probablement pas du jeu actif)
+        MIN_DETECTIONS_ACTIVE = 1
+
+        inactivity_gap_frames = int(INACTIVITY_GAP * self.fps)
 
         for i, serve in enumerate(serves):
             # Début du point : directement au service
             rally_start_frame = serve['frame']
 
-            # Déterminer la borne max (le service suivant, ou fin de vidéo)
+            # Borne max = le service suivant (ou fin de vidéo)
             if i + 1 < len(serves):
                 next_serve_frame = serves[i + 1]['frame']
             else:
                 next_serve_frame = self.total_frames
 
-            # Chercher la dernière action YOLO entre ce service et le suivant
-            # (exclure les événements "serve" du service suivant)
-            last_action_frame = serve['frame']  # au minimum, le service lui-même
-            for e in self.events:
-                if e['frame'] > serve['frame'] and e['frame'] < next_serve_frame:
-                    # C'est une action pendant ce point (pas le prochain service)
-                    if e['frame'] > last_action_frame:
-                        last_action_frame = e['frame']
-
-            # Aussi chercher dans les détections brutes (frame_actions)
-            # pour capter les actions non élevées en "événement"
+            # ============================================================
+            # Trouver la fin du rallye par détection de gap d'inactivité
+            # ============================================================
+            # On parcourt les frame_actions après le service.
+            # On cherche le PREMIER trou >= INACTIVITY_GAP sans détection.
+            # Le point se termine à la dernière détection avant ce trou.
+            
+            last_active_frame = rally_start_frame
+            rally_end_frame = None
+            
             for f in self.frame_actions:
-                if f['frame'] > serve['frame'] and f['frame'] < next_serve_frame:
-                    if f['detections'] and f['frame'] > last_action_frame:
-                        last_action_frame = f['frame']
-
-            # Fin du point = dernière action + 4 secondes
-            rally_end_frame = last_action_frame + int(self.fps * BUFFER_AFTER_LAST_ACTION)
+                if f['frame'] < rally_start_frame:
+                    continue
+                if f['frame'] >= next_serve_frame:
+                    break
+                
+                if f['detections'] and len(f['detections']) >= MIN_DETECTIONS_ACTIVE:
+                    # Vérifier s'il y a eu un gap AVANT cette détection
+                    gap = f['frame'] - last_active_frame
+                    if gap > inactivity_gap_frames and last_active_frame > rally_start_frame:
+                        # GAP trouvé ! Le rallye s'est terminé à last_active_frame
+                        rally_end_frame = last_active_frame
+                        break
+                    # Mettre à jour la dernière frame active
+                    last_active_frame = f['frame']
+            
+            # Si pas de gap trouvé, utiliser la dernière frame active
+            if rally_end_frame is None:
+                rally_end_frame = last_active_frame
 
             # Ne pas dépasser le service suivant ni la fin de vidéo
             rally_end_frame = min(rally_end_frame, next_serve_frame - 1, self.total_frames)
 
-            # S'assurer qu'on ne dépasse pas les bornes
+            # Durée minimale : au moins MIN_RALLY_SECONDS
             rally_end_frame = max(rally_end_frame, rally_start_frame + int(self.fps * MIN_RALLY_SECONDS))
             rally_end_frame = min(rally_end_frame, self.total_frames)
 
@@ -600,6 +619,11 @@ class VolleyballAnalyzer:
                 'rotation': None,
             }
             self.rallies.append(rally)
+            
+            # Log pour debug
+            gap_info = f"(gap@{self.time_to_str(self.frame_to_time(rally_end_frame))})" if rally_end_frame < next_serve_frame - 1 else "(→next serve)"
+            print(f"   Point {rally['rally_num']}: {rally['start_time_str']}-{rally['end_time_str']} "
+                  f"({rally['duration']:.1f}s) {gap_info}")
 
     def _rally_detection_from_activity(self):
         """Détecte les rallyes basés sur les périodes d'activité/inactivité."""
