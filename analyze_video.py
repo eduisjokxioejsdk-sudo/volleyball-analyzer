@@ -515,32 +515,50 @@ class VolleyballAnalyzer:
 
         return self.rallies
 
-    def _deduplicate_serves(self, raw_serves, min_gap_seconds=10.0):
-        
+    def _deduplicate_serves(self, raw_serves, min_gap_seconds=12.0):
         """
-        Fusionne les services détectés trop proches les uns des autres.
+        Logique de la "Grappe" — filtre les faux serves de préparation.
         
-        Si deux services sont à moins de min_gap_seconds l'un de l'autre,
-        on ne garde que le premier (c'est probablement le même service
-        détecté plusieurs fois par l'IA).
+        PROBLÈME : YOLO confond la routine de préparation (rebonds de balle,
+        placement, lancer) avec le vrai service frappé. Cela génère des faux
+        positifs rapprochés dans le temps.
         
-        Un vrai point de volleyball dure au minimum ~5-6 secondes
-        (service + réception + attaque), donc 12s de gap minimum est safe.
+        SOLUTION :
+        1. CLUSTERING : Si plusieurs "Serve" se succèdent avec < min_gap_seconds
+           d'écart, ils font partie de la même "grappe" de préparation.
+        2. NETTOYAGE : Dans une grappe, SEUL LE DERNIER "Serve" est conservé.
+           C'est lui le vrai service frappé. Les précédents = préparation.
+        
+        Avant : [S@10s, S@12s, S@16s, ...S@55s] → gardait S@10s (FAUX)
+        Après : [S@10s, S@12s, S@16s, ...S@55s] → garde S@16s (CORRECT)
         """
         if not raw_serves:
             return []
         
-        deduplicated = [raw_serves[0]]
+        # Étape 1 : Construire les grappes
+        clusters = [[raw_serves[0]]]
         
         for serve in raw_serves[1:]:
-            last_serve = deduplicated[-1]
-            gap_seconds = (serve['frame'] - last_serve['frame']) / self.fps if self.fps > 0 else 999
+            last_serve_in_cluster = clusters[-1][-1]
+            gap_seconds = (serve['frame'] - last_serve_in_cluster['frame']) / self.fps if self.fps > 0 else 999
             
-            if gap_seconds >= min_gap_seconds:
-                deduplicated.append(serve)
+            if gap_seconds < min_gap_seconds:
+                # Gap petit → même routine de préparation
+                clusters[-1].append(serve)
             else:
-                # Service trop proche du précédent → on l'ignore (doublon)
-                pass
+                # Gap grand → nouveau point, nouvelle grappe
+                clusters.append([serve])
+        
+        # Étape 2 : Garder LE DERNIER serve de chaque grappe (= le vrai)
+        deduplicated = []
+        for cluster in clusters:
+            real_serve = cluster[-1]  # LE DERNIER = le vrai service frappé
+            deduplicated.append(real_serve)
+            if len(cluster) > 1:
+                fake_count = len(cluster) - 1
+                print(f"   🧹 Grappe de {len(cluster)} serves → gardé le dernier "
+                      f"@{self.time_to_str(real_serve['time'])} "
+                      f"({fake_count} faux serves de préparation supprimés)")
         
         return deduplicated
 
