@@ -176,7 +176,7 @@ class VolleyballAnalyzer:
     """Analyse une vidéo de volleyball pour détecter les rallyes et attribuer le score."""
 
     def __init__(self, video_path, output_dir="Output", confidence=0.4, 
-                 img_size=640, use_gpu=False, frame_skip=8,
+                 img_size=640, use_gpu=False, frame_skip=15,
                  team_left="Équipe A", team_right="Équipe B",
                  setter_start_left='P1', setter_start_right='P1',
                  first_serve='left'):
@@ -536,11 +536,11 @@ class VolleyballAnalyzer:
         - Fin du point   = dernière action YOLO avant le service suivant + 4 secondes
         - Dernier point  = dernière action après le dernier service + 4 secondes
         """
-        BUFFER_AFTER_LAST_ACTION = 4.0  # secondes après la dernière action
+        BUFFER_AFTER_LAST_ACTION = 2.0  # secondes après la dernière action
 
         for i, serve in enumerate(serves):
-            # Début du point : service actuel - 2 secondes
-            rally_start_frame = max(0, serve['frame'] - int(self.fps * 2))
+            # Début du point : directement au service
+            rally_start_frame = serve['frame']
 
             # Déterminer la borne max (le service suivant, ou fin de vidéo)
             if i + 1 < len(serves):
