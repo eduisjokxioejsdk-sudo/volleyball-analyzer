@@ -176,7 +176,7 @@ class VolleyballAnalyzer:
     """Analyse une vidéo de volleyball pour détecter les rallyes et attribuer le score."""
 
     def __init__(self, video_path, output_dir="Output", confidence=0.4, 
-                 img_size=None, use_gpu=False, frame_skip=5,
+                 img_size=640, use_gpu=False, frame_skip=8,
                  team_left="Équipe A", team_right="Équipe B",
                  setter_start_left='P1', setter_start_right='P1',
                  first_serve='left'):

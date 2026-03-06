@@ -236,7 +236,7 @@ def start_analysis():
         params = {
             'video_id': request.form.get('video_id'),
             'confidence': float(request.form.get('confidence', 0.4)),
-            'frame_skip': int(request.form.get('frame_skip', 3)),
+            'frame_skip': int(request.form.get('frame_skip', 8)),
             'team_left': request.form.get('team_left', 'Equipe A'),
             'team_right': request.form.get('team_right', 'Equipe B'),
             'setter_start_left': request.form.get('setter_start_left', 'P1'),
@@ -254,7 +254,7 @@ def start_analysis():
         params = {
             'video_id': data.get('video_id'),
             'confidence': float(data.get('confidence', 0.4)),
-            'frame_skip': int(data.get('frame_skip', 3)),
+            'frame_skip': int(data.get('frame_skip', 8)),
             'team_left': data.get('team_left', 'Equipe A'),
             'team_right': data.get('team_right', 'Equipe B'),
             'setter_start_left': data.get('setter_start_left', 'P1'),
