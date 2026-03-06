@@ -24,20 +24,20 @@ except ImportError:
     print("pip install flask flask-cors")
     sys.exit(1)
 
-# Supabase client pour mise à jour directe de la DB
+# Supabase direct update is OPTIONAL (frontend handles it via polling)
+# Only used if SUPABASE_SERVICE_KEY is configured
+supabase_client = None
 try:
-    from supabase import create_client, Client as SupabaseClient
     SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
     SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-    supabase_client: SupabaseClient | None = None
     if SUPABASE_URL and SUPABASE_KEY:
+        from supabase import create_client
         supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print(f"✅ Supabase connecté: {SUPABASE_URL[:40]}...")
+        print(f"✅ Supabase connecté (optionnel): {SUPABASE_URL[:40]}...")
     else:
-        print("⚠️  SUPABASE_URL ou SUPABASE_SERVICE_KEY non configurées - pas de mise à jour DB")
-except ImportError:
-    supabase_client = None
-    print("⚠️  supabase-py non installé - pas de mise à jour DB")
+        print("ℹ️  Pas de SUPABASE_SERVICE_KEY → le frontend gère les mises à jour DB via polling")
+except Exception:
+    print("ℹ️  Supabase non configuré → le frontend gère les mises à jour DB via polling")
 
 from analyze_video import VolleyballAnalyzer
 
