@@ -11,7 +11,7 @@ from pathlib import Path
 # PYTHONPATH
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -199,67 +199,80 @@ def health():
 
 
 @app.post("/api/analyze")
-async def start_analysis_endpoint(
-    video_url: str = Form(None),
-    video_id: str = Form(None),
-    team_left: str = Form("Equipe A"),
-    team_right: str = Form("Equipe B"),
-    setter_start_left: str = Form("P1"),
-    setter_start_right: str = Form("P1"),
-    first_serve: str = Form("left"),
-    video: UploadFile = File(None),
-):
-    """Lancer une analyse. Accepte: upload ou video_url."""
-    video_path = None
-    params = dict(
-        video_id=video_id, team_left=team_left, team_right=team_right,
-        setter_start_left=setter_start_left, setter_start_right=setter_start_right,
-        first_serve=first_serve, use_gpu=False,
-    )
+async def start_analysis_endpoint(request: Request):
+    """
+    Lancer une analyse. Accepte JSON ou multipart/form-data.
+    Le frontend envoie du JSON avec Content-Type: application/json.
+    """
+    content_type = request.headers.get("content-type", "")
 
-    if video is not None:
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{video.filename}")
-        with open(video_path, 'wb') as f:
-            content = await video.read()
-            f.write(content)
-    elif video_url:
-        video_path = video_url  # sera téléchargé dans le thread
+    if "application/json" in content_type:
+        # --- JSON body (cas principal du frontend) ---
+        body = await request.json()
+        video_url = body.get("video_url")
+        if not video_url:
+            raise HTTPException(400, "video_url requis")
+        video_path = video_url
+        params = {
+            "video_id": body.get("video_id"),
+            "team_left": body.get("team_left", "Equipe A"),
+            "team_right": body.get("team_right", "Equipe B"),
+            "setter_start_left": body.get("setter_start_left", "P1"),
+            "setter_start_right": body.get("setter_start_right", "P1"),
+            "first_serve": body.get("first_serve", "left"),
+            "use_gpu": False,
+        }
+    elif "multipart/form-data" in content_type:
+        # --- Form data (upload de fichier) ---
+        form = await request.form()
+        video_url = form.get("video_url")
+        video_file = form.get("video")
+        params = {
+            "video_id": form.get("video_id"),
+            "team_left": form.get("team_left", "Equipe A"),
+            "team_right": form.get("team_right", "Equipe B"),
+            "setter_start_left": form.get("setter_start_left", "P1"),
+            "setter_start_right": form.get("setter_start_right", "P1"),
+            "first_serve": form.get("first_serve", "left"),
+            "use_gpu": False,
+        }
+        if video_file and hasattr(video_file, "read"):
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            fname = getattr(video_file, "filename", "upload.mp4")
+            video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{fname}")
+            content = await video_file.read()
+            with open(video_path, "wb") as f:
+                f.write(content)
+        elif video_url:
+            video_path = video_url
+        else:
+            raise HTTPException(400, "Pas de vidéo fournie")
     else:
-        raise HTTPException(400, "Pas de vidéo fournie (video_url ou fichier)")
+        # --- Fallback: essayer JSON ---
+        try:
+            body = await request.json()
+            video_url = body.get("video_url")
+            if not video_url:
+                raise HTTPException(400, "video_url requis")
+            video_path = video_url
+            params = {
+                "video_id": body.get("video_id"),
+                "team_left": body.get("team_left", "Equipe A"),
+                "team_right": body.get("team_right", "Equipe B"),
+                "setter_start_left": body.get("setter_start_left", "P1"),
+                "setter_start_right": body.get("setter_start_right", "P1"),
+                "first_serve": body.get("first_serve", "left"),
+                "use_gpu": False,
+            }
+        except Exception:
+            raise HTTPException(400, "Content-Type non supporté. Utilisez JSON ou multipart/form-data.")
 
     aid = uuid.uuid4().hex[:12]
-    analyses[aid] = dict(id=aid, status='queued', progress='En attente...', percent=0,
+    analyses[aid] = dict(id=aid, status="queued", progress="En attente...", percent=0,
                          results=None, detected_points=None, error=None)
     thread = threading.Thread(target=run_analysis, args=(aid, video_path, params), daemon=True)
     thread.start()
-    return JSONResponse({"analysis_id": aid, "status": "queued", "video_id": video_id}, 202)
-
-
-# Aussi accepter du JSON brut
-@app.post("/api/analyze/json")
-async def start_analysis_json(body: dict):
-    """Lancer une analyse via JSON body."""
-    video_url = body.get('video_url')
-    if not video_url:
-        raise HTTPException(400, "video_url requis")
-
-    params = {
-        'video_id': body.get('video_id'),
-        'team_left': body.get('team_left', 'Equipe A'),
-        'team_right': body.get('team_right', 'Equipe B'),
-        'setter_start_left': body.get('setter_start_left', 'P1'),
-        'setter_start_right': body.get('setter_start_right', 'P1'),
-        'first_serve': body.get('first_serve', 'left'),
-        'use_gpu': False,
-    }
-
-    aid = uuid.uuid4().hex[:12]
-    analyses[aid] = dict(id=aid, status='queued', progress='En attente...', percent=0,
-                         results=None, detected_points=None, error=None)
-    thread = threading.Thread(target=run_analysis, args=(aid, video_url, params), daemon=True)
-    thread.start()
-    return JSONResponse({"analysis_id": aid, "status": "queued", "video_id": params.get('video_id')}, 202)
+    return JSONResponse({"analysis_id": aid, "status": "queued", "video_id": params.get("video_id")}, 202)
 
 
 @app.get("/api/analyze/{analysis_id}")
