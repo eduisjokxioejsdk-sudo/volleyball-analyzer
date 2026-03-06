@@ -56,7 +56,7 @@ EVENT_THRESHOLD = 3             # Nb de détections nécessaires pour déclarer 
 
 # Paramètres de découpage des rallyes
 INACTIVITY_SECONDS = 4.0        # Secondes sans action YOLO = fin du rallye
-MIN_RALLY_SECONDS = 3.0         # Durée minimale d'un rallye valide (ignore les faux services)
+MIN_RALLY_SECONDS = 5.0         # Durée minimale d'un rallye valide (filtre les préparations au service)
 RALLY_END_BUFFER = 1.5          # Secondes de buffer après la dernière action détectée
 RALLY_START_BUFFER = 1.0        # Secondes de buffer avant le service
 
