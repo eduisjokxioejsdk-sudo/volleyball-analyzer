@@ -515,7 +515,8 @@ class VolleyballAnalyzer:
 
         return self.rallies
 
-    def _deduplicate_serves(self, raw_serves, min_gap_seconds=8.0):
+    def _deduplicate_serves(self, raw_serves, min_gap_seconds=10.0):
+        
         """
         Fusionne les services détectés trop proches les uns des autres.
         
@@ -602,20 +603,45 @@ class VolleyballAnalyzer:
             if rally_end_frame is None:
                 rally_end_frame = last_active_frame
 
+            # ============================================================
+            # FILTRE 1 : Durée naturelle minimale (AVANT buffer)
+            # Si la durée naturelle (gap-detected) est < MIN_RALLY_SECONDS,
+            # c'est une préparation au service, PAS un vrai point.
+            # On ne GONFLE PAS les points courts, on les SUPPRIME.
+            # ============================================================
+            natural_duration = (rally_end_frame - rally_start_frame) / self.fps if self.fps > 0 else 0
+            if natural_duration < MIN_RALLY_SECONDS:
+                print(f"   ⏭️  Service @{self.time_to_str(serve['time'])} ignoré "
+                      f"(durée naturelle {natural_duration:.1f}s < {MIN_RALLY_SECONDS}s)")
+                continue
+
+            # ============================================================
+            # FILTRE 2 : Activité réelle après le service
+            # Un vrai point a des détections YOLO après le service
+            # (réception, set, attaque, etc.). Une préparation n'a que
+            # des détections "serve" isolées.
+            # ============================================================
+            # Compter les frames avec des détections NON-serve dans le rallye
+            non_serve_detection_count = 0
+            for f in self.frame_actions:
+                if f['frame'] < rally_start_frame:
+                    continue
+                if f['frame'] > rally_end_frame:
+                    break
+                for det in f['detections']:
+                    if det['action'] != 'serve':
+                        non_serve_detection_count += 1
+            
+            if non_serve_detection_count < 2:
+                print(f"   ⏭️  Service @{self.time_to_str(serve['time'])} ignoré "
+                      f"(seulement {non_serve_detection_count} détections non-serve → pas de jeu réel)")
+                continue
+
             # Ajouter 1.5s de buffer après la dernière action (évite coupure trop sèche)
             rally_end_frame = rally_end_frame + int(self.fps * 1.5)
 
             # Ne pas dépasser le service suivant ni la fin de vidéo
             rally_end_frame = min(rally_end_frame, next_serve_frame - 1, self.total_frames)
-
-            # Durée minimale : au moins MIN_RALLY_SECONDS
-            rally_end_frame = max(rally_end_frame, rally_start_frame + int(self.fps * MIN_RALLY_SECONDS))
-            rally_end_frame = min(rally_end_frame, self.total_frames)
-
-            # Vérifier la durée minimale
-            min_rally_frames = int(MIN_RALLY_SECONDS * self.fps)
-            if rally_end_frame - rally_start_frame < min_rally_frames:
-                continue
 
             # Collecter les événements de ce rallye
             rally_events = [
