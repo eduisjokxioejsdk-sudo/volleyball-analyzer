@@ -16,7 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 
-from analyze_video import VolleyballAnalyzer
+# LAZY IMPORT: VolleyballAnalyzer est importé dans run_analysis()
+# pour que le serveur démarre rapidement (healthcheck Railway)
+VolleyballAnalyzer = None
 
 # ---------------------------------------------------------------------------
 # Supabase (optionnel)
@@ -93,6 +95,14 @@ def _position_to_number(pos_str):
 # ---------------------------------------------------------------------------
 
 def run_analysis(analysis_id, video_path_or_url, params):
+    global VolleyballAnalyzer
+    # Lazy import — charge torch/transformers/ultralytics au premier appel
+    if VolleyballAnalyzer is None:
+        print("📦 Premier appel: import de VolleyballAnalyzer (torch + transformers)...")
+        from analyze_video import VolleyballAnalyzer as _VA
+        VolleyballAnalyzer = _VA
+        print("✅ Import terminé")
+
     video_id = params.get('video_id')
     video_path = video_path_or_url
 

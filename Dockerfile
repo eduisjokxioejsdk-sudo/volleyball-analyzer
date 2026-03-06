@@ -17,8 +17,9 @@ COPY ml_manager/ ./ml_manager/
 COPY analyze_video.py .
 COPY api_server.py .
 
-# Port exposé pour l'API
+# Port (Railway injecte $PORT)
+ENV PORT=8000
 EXPOSE 8000
 
-# Lancer le serveur API
-CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Lancer le serveur API avec le port dynamique de Railway
+CMD uvicorn api_server:app --host 0.0.0.0 --port $PORT
