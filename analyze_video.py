@@ -55,9 +55,10 @@ SLIDING_WINDOW_SIZE = 10        # Taille de la fenêtre glissante (en nb de fram
 EVENT_THRESHOLD = 3             # Nb de détections nécessaires pour déclarer un événement
 
 # Paramètres de découpage des rallyes
-INACTIVITY_SECONDS = 3.0        # Secondes sans action = fin du rallye
+INACTIVITY_SECONDS = 4.0        # Secondes sans action YOLO = fin du rallye
 MIN_RALLY_SECONDS = 3.0         # Durée minimale d'un rallye valide (ignore les faux services)
-MAX_GAP_BEFORE_SERVE = 5.0      # Secondes max avant un service pour chercher le début
+RALLY_END_BUFFER = 1.5          # Secondes de buffer après la dernière action détectée
+RALLY_START_BUFFER = 1.0        # Secondes de buffer avant le service
 
 # Paramètres de scoring
 FRAME_CENTER_RATIO = 0.5        # Ratio pour séparer les deux côtés du terrain
@@ -532,24 +533,45 @@ class VolleyballAnalyzer:
         
         Logique :
         - Début du point = service détecté - 2 secondes
-        - Fin du point   = service SUIVANT - 10 secondes
-        - Dernier point  = dernier service - 2s → fin vidéo - 10s (ou fin vidéo)
+        - Fin du point   = dernière action YOLO avant le service suivant + 4 secondes
+        - Dernier point  = dernière action après le dernier service + 4 secondes
         """
+        BUFFER_AFTER_LAST_ACTION = 4.0  # secondes après la dernière action
+
         for i, serve in enumerate(serves):
             # Début du point : service actuel - 2 secondes
             rally_start_frame = max(0, serve['frame'] - int(self.fps * 2))
 
-            # Fin du point : service suivant - 10 secondes
+            # Déterminer la borne max (le service suivant, ou fin de vidéo)
             if i + 1 < len(serves):
                 next_serve_frame = serves[i + 1]['frame']
-                rally_end_frame = next_serve_frame - int(self.fps * 10)
             else:
-                # Dernier point : fin vidéo - 10s ou fin vidéo
-                rally_end_frame = self.total_frames - int(self.fps * 10)
-                if rally_end_frame <= rally_start_frame:
-                    rally_end_frame = self.total_frames
+                next_serve_frame = self.total_frames
+
+            # Chercher la dernière action YOLO entre ce service et le suivant
+            # (exclure les événements "serve" du service suivant)
+            last_action_frame = serve['frame']  # au minimum, le service lui-même
+            for e in self.events:
+                if e['frame'] > serve['frame'] and e['frame'] < next_serve_frame:
+                    # C'est une action pendant ce point (pas le prochain service)
+                    if e['frame'] > last_action_frame:
+                        last_action_frame = e['frame']
+
+            # Aussi chercher dans les détections brutes (frame_actions)
+            # pour capter les actions non élevées en "événement"
+            for f in self.frame_actions:
+                if f['frame'] > serve['frame'] and f['frame'] < next_serve_frame:
+                    if f['detections'] and f['frame'] > last_action_frame:
+                        last_action_frame = f['frame']
+
+            # Fin du point = dernière action + 4 secondes
+            rally_end_frame = last_action_frame + int(self.fps * BUFFER_AFTER_LAST_ACTION)
+
+            # Ne pas dépasser le service suivant ni la fin de vidéo
+            rally_end_frame = min(rally_end_frame, next_serve_frame - 1, self.total_frames)
 
             # S'assurer qu'on ne dépasse pas les bornes
+            rally_end_frame = max(rally_end_frame, rally_start_frame + int(self.fps * MIN_RALLY_SECONDS))
             rally_end_frame = min(rally_end_frame, self.total_frames)
 
             # Vérifier la durée minimale
