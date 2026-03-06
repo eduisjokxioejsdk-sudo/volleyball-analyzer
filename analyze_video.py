@@ -515,7 +515,7 @@ class VolleyballAnalyzer:
 
         return self.rallies
 
-    def _deduplicate_serves(self, raw_serves, min_gap_seconds=6.0):
+    def _deduplicate_serves(self, raw_serves, min_gap_seconds=8.0):
         """
         Fusionne les services détectés trop proches les uns des autres.
         
