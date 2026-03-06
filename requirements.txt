@@ -1,12 +1,34 @@
---extra-index-url https://download.pytorch.org/whl/cpu
+# CourtVision v2 - VideoMAE + YOLO
+# Core ML
 torch
 torchvision
-ultralytics>=8.0.0
-opencv-python-headless>=4.7.0
-numpy>=1.23.0
-tqdm
-flask>=3.0.0
-flask-cors>=4.0.0
-requests>=2.28.0
-supabase>=2.0.0
-gunicorn
+ultralytics
+transformers
+
+# Video / Image
+opencv-python-headless
+pillow
+numpy
+
+# ml_manager dependencies
+pydantic
+pydantic-settings
+pyyaml
+gdown
+supervision
+dataclasses-json
+loguru
+norfair
+
+# pytorchvideo (fix compatibility - install from GitHub)
+pytorchvideo @ git+https://github.com/facebookresearch/pytorchvideo
+
+# API server
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+boto3
+httpx
+requests
+supabase

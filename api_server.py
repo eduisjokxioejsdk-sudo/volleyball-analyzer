@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
 """
-CourtVision - API REST pour l'analyse de volleyball
-Met à jour Supabase directement quand l'analyse est terminée.
+CourtVision v2 — API REST (FastAPI)
+====================================
+Expose l'analyse VideoMAE + YOLO via une API REST.
+Met à jour Supabase en direct pendant l'analyse.
 """
 import os, sys, json, uuid, threading, tempfile
 from pathlib import Path
 
-# Permettre de configurer le chemin VolleyVision via env
-if os.environ.get("VOLLEYVISION_DIR"):
-    import analyze_video
-    analyze_video.VOLLEYVISION_DIR = os.environ["VOLLEYVISION_DIR"]
-    analyze_video.ACTIONS_MODEL_PATH = os.path.join(
-        os.environ["VOLLEYVISION_DIR"], "Stage II - Players & Actions", "actions", "yV8_medium", "weights", "best.pt"
-    )
-    analyze_video.PLAYERS_MODEL_PATH = os.path.join(
-        os.environ["VOLLEYVISION_DIR"], "Stage II - Players & Actions", "players", "yV8_medium", "weights", "best.pt"
-    )
+# PYTHONPATH
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    from flask import Flask, request, jsonify
-    from flask_cors import CORS
-except ImportError:
-    print("pip install flask flask-cors")
-    sys.exit(1)
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import uvicorn
 
-# Supabase direct update is OPTIONAL (frontend handles it via polling)
-# Only used if SUPABASE_SERVICE_KEY is configured
+from analyze_video import VolleyballAnalyzer
+
+# ---------------------------------------------------------------------------
+# Supabase (optionnel)
+# ---------------------------------------------------------------------------
 supabase_client = None
 try:
     SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -33,78 +28,93 @@ try:
     if SUPABASE_URL and SUPABASE_KEY:
         from supabase import create_client
         supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print(f"✅ Supabase connecté (optionnel): {SUPABASE_URL[:40]}...")
+        print(f"✅ Supabase connecté: {SUPABASE_URL[:40]}...")
     else:
-        print("ℹ️  Pas de SUPABASE_SERVICE_KEY → le frontend gère les mises à jour DB via polling")
+        print("ℹ️  Pas de SUPABASE_SERVICE_KEY — le frontend gère via polling")
 except Exception:
-    print("ℹ️  Supabase non configuré → le frontend gère les mises à jour DB via polling")
+    print("ℹ️  Supabase non configuré")
 
-from analyze_video import VolleyballAnalyzer
-
-app = Flask(__name__)
-CORS(app)
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+app = FastAPI(title="CourtVision v2 — VideoMAE + YOLO API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 analyses = {}
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "cv_uploads")
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "cv_outputs")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def update_supabase_video(video_id, status, progress, points_data=None):
-    """Met à jour le statut de la vidéo dans Supabase."""
     if not supabase_client or not video_id:
         return
     try:
-        update_data = {"status": status, "progress": progress}
+        data = {"status": status, "progress": progress}
         if points_data is not None:
-            update_data["points_data"] = points_data
-        supabase_client.table("videos").update(update_data).eq("id", video_id).execute()
-        print(f"📝 Supabase: video {video_id[:8]}... → {status} ({progress}%)")
+            data["points_data"] = points_data
+        supabase_client.table("videos").update(data).eq("id", video_id).execute()
+        print(f"📝 Supabase: {video_id[:8]}... → {status} ({progress}%)")
     except Exception as e:
-        print(f"⚠️  Erreur Supabase update: {e}")
+        print(f"⚠️  Supabase update error: {e}")
 
 
-def download_video(url, dest_path):
-    """Télécharge une vidéo depuis une URL."""
+def download_video(url, dest):
     import requests as req
     print(f"⬇️  Téléchargement: {url[:80]}...")
     r = req.get(url, stream=True, timeout=600)
     r.raise_for_status()
-    with open(dest_path, 'wb') as f:
-        for chunk in r.iter_content(chunk_size=8192):
+    with open(dest, 'wb') as f:
+        for chunk in r.iter_content(8192):
             f.write(chunk)
-    size_mb = os.path.getsize(dest_path) / (1024 * 1024)
-    print(f"   ✅ Téléchargé: {size_mb:.1f} MB")
-    return dest_path
+    mb = os.path.getsize(dest) / (1024 * 1024)
+    print(f"   ✅ {mb:.1f} MB téléchargés")
 
+
+def _position_to_number(pos_str):
+    try:
+        return int(pos_str.replace('P', ''))
+    except Exception:
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Background analysis
+# ---------------------------------------------------------------------------
 
 def run_analysis(analysis_id, video_path_or_url, params):
-    """Lance une analyse en arrière-plan et met à jour Supabase."""
-    video_id = params.get('video_id')  # ID de la vidéo dans Supabase
+    video_id = params.get('video_id')
     video_path = video_path_or_url
-    
+
     try:
-        # Si c'est une URL, télécharger dans le thread (ne bloque pas le request handler)
+        # Télécharger si URL
         if isinstance(video_path_or_url, str) and video_path_or_url.startswith('http'):
             analyses[analysis_id]['status'] = 'downloading'
-            analyses[analysis_id]['progress'] = 'Téléchargement de la vidéo...'
+            analyses[analysis_id]['progress'] = 'Téléchargement...'
             analyses[analysis_id]['percent'] = 1
             update_supabase_video(video_id, "PROCESSING", 1)
-            
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
+
             ext = video_path_or_url.split('?')[0].split('.')[-1][:4] or 'mp4'
             video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}.{ext}")
             try:
                 download_video(video_path_or_url, video_path)
             except Exception as e:
                 update_supabase_video(video_id, "ERROR", 0)
-                analyses[analysis_id]['status'] = 'error'
-                analyses[analysis_id]['error'] = f'Download failed: {e}'
-                print(f"❌ Download error: {e}")
+                analyses[analysis_id].update(status='error', error=f'Download failed: {e}')
                 return
-        
-        analyses[analysis_id]['status'] = 'running'
-        analyses[analysis_id]['progress'] = 'Chargement du modèle...'
-        analyses[analysis_id]['percent'] = 3
+
+        # Lancer l'analyse
+        analyses[analysis_id].update(status='running', progress='Chargement des modèles...', percent=3)
         update_supabase_video(video_id, "PROCESSING", 3)
 
         output_dir = os.path.join(OUTPUT_DIR, analysis_id)
@@ -112,220 +122,175 @@ def run_analysis(analysis_id, video_path_or_url, params):
         analyzer = VolleyballAnalyzer(
             video_path=video_path,
             output_dir=output_dir,
-            confidence=params.get('confidence', 0.4),
-            use_gpu=params.get('use_gpu', False),
-            frame_skip=params.get('frame_skip', 3),
             team_left=params.get('team_left', 'Equipe A'),
             team_right=params.get('team_right', 'Equipe B'),
             setter_start_left=params.get('setter_start_left', 'P1'),
             setter_start_right=params.get('setter_start_right', 'P1'),
             first_serve=params.get('first_serve', 'left'),
+            use_gpu=params.get('use_gpu', False),
         )
 
-        analyses[analysis_id]['progress'] = 'Detection des actions...'
-        analyses[analysis_id]['percent'] = 5
+        # Progress callback pour le scan vidéo
+        def on_progress(pct):
+            global_pct = 5 + int(pct * 0.90)  # 5% → 95%
+            analyses[analysis_id].update(percent=global_pct, progress=f'Analyse... {pct}%')
+            update_supabase_video(video_id, "PROCESSING", global_pct)
+
+        analyses[analysis_id].update(progress='Analyse vidéo...', percent=5)
         update_supabase_video(video_id, "PROCESSING", 5)
 
-        # Real progress callback: detect_actions progress (0-100) → global 5-85%
-        def on_detect_progress(frame_percent):
-            global_percent = 5 + int(frame_percent * 0.80)  # 5% + 80% of total
-            analyses[analysis_id]['percent'] = global_percent
-            analyses[analysis_id]['progress'] = f'Detection des actions... {frame_percent}%'
-            update_supabase_video(video_id, "PROCESSING", global_percent)
+        # Pipeline complet (scan + build + score + export)
+        analyzer.run(progress_callback=on_progress)
 
-        analyzer.detect_actions(progress_callback=on_detect_progress)
-
-        analyses[analysis_id]['progress'] = 'Detection des evenements...'
-        analyses[analysis_id]['percent'] = 87
-        update_supabase_video(video_id, "PROCESSING", 87)
-        analyzer.detect_events()
-
-        analyses[analysis_id]['progress'] = 'Decoupage des rallyes...'
-        analyses[analysis_id]['percent'] = 92
-        update_supabase_video(video_id, "PROCESSING", 92)
-        analyzer.detect_rallies()
-
-        analyses[analysis_id]['progress'] = 'Export des resultats...'
-        analyses[analysis_id]['percent'] = 96
-        update_supabase_video(video_id, "PROCESSING", 96)
-        analyzer.export_results()
-
-        # Lire le JSON
+        # Lire les résultats JSON
         results_path = os.path.join(output_dir, "analysis_results.json")
         with open(results_path, 'r', encoding='utf-8') as f:
             results = json.load(f)
 
-        # Convertir les rallyes au format frontend (DetectedPoint[])
+        # Convertir au format frontend (DetectedPoint[])
         detected_points = []
         for rally in results.get('rallies', []):
             rot = rally.get('rotation', {})
+            team_left = params.get('team_left', 'Equipe A')
+            team_right = params.get('team_right', 'Equipe B')
             detected_points.append({
                 'id': rally['rally_num'],
                 'startTime': rally['start_time'],
                 'endTime': rally['end_time'],
                 'label': f"Point {rally['rally_num']}",
-                'winner': 'A' if rally['scored_by'] == params.get('team_left', 'Equipe A') else 'B' if rally['scored_by'] == params.get('team_right', 'Equipe B') else None,
-                'servingTeamAtStart': 'A' if rot.get('serving_team') == params.get('team_left', 'Equipe A') else 'B',
+                'winner': 'A' if rally['scored_by'] == team_left else 'B' if rally['scored_by'] == team_right else None,
+                'servingTeamAtStart': 'A' if rot.get('serving_team') == team_left else 'B',
                 'rotationAtStart': _position_to_number(rot.get('setter_left', 'P1')),
             })
 
-        analyses[analysis_id]['status'] = 'completed'
-        analyses[analysis_id]['progress'] = 'Termine'
-        analyses[analysis_id]['percent'] = 100
-        analyses[analysis_id]['results'] = results
-        analyses[analysis_id]['detected_points'] = detected_points
-
-        # ✅ Mettre à jour Supabase avec les résultats finaux
+        analyses[analysis_id].update(
+            status='completed', progress='Terminé', percent=100,
+            results=results, detected_points=detected_points,
+        )
         update_supabase_video(video_id, "READY", 100, detected_points)
-        print(f"🏐 Analyse terminée: {len(detected_points)} points détectés pour video {video_id}")
+        print(f"🏐 Terminé: {len(detected_points)} points pour video {video_id}")
 
-        analyzer.cap.release()
-
-        # Nettoyer le fichier vidéo temporaire
+        # Cleanup
         if os.path.exists(video_path) and video_path.startswith(tempfile.gettempdir()):
-            try: os.remove(video_path)
-            except: pass
+            try:
+                os.remove(video_path)
+            except Exception:
+                pass
 
-    except BaseException as e:
-        analyses[analysis_id]['status'] = 'error'
-        analyses[analysis_id]['error'] = str(e)
-        analyses[analysis_id]['percent'] = 0
-        # ❌ Mettre à jour Supabase avec le statut erreur
+    except Exception as e:
+        analyses[analysis_id].update(status='error', error=str(e), percent=0)
         update_supabase_video(video_id, "ERROR", 0)
         import traceback
         print(traceback.format_exc())
 
 
-def _position_to_number(pos_str):
-    """Convertit P1-P6 en 1-6."""
-    try:
-        return int(pos_str.replace('P', ''))
-    except:
-        return 1
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
-
-@app.route('/health', methods=['GET'])
-@app.route('/api/health', methods=['GET'])
+@app.get("/health")
+@app.get("/api/health")
 def health():
-    import analyze_video as av
-    actions_exists = os.path.exists(av.ACTIONS_MODEL_PATH)
-    actions_size = os.path.getsize(av.ACTIONS_MODEL_PATH) if actions_exists else 0
-    return jsonify({
-        'status': 'ok',
-        'service': 'CourtVision YOLO Volleyball Analyzer',
-        'supabase_connected': supabase_client is not None,
-        'model_actions_path': av.ACTIONS_MODEL_PATH,
-        'model_actions_exists': actions_exists,
-        'model_actions_size_mb': round(actions_size / (1024*1024), 1),
-        'volleyvision_dir': av.VOLLEYVISION_DIR,
-    })
-
-
-@app.route('/api/analyze', methods=['POST'])
-def start_analysis():
-    """Lancer une analyse. Accepte: upload fichier OU JSON { video_url: "...", video_id: "..." }"""
-    video_path = None
-    params = {}
-
-    if request.content_type and 'multipart' in request.content_type:
-        if 'video' in request.files:
-            video_file = request.files['video']
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{video_file.filename}")
-            video_file.save(video_path)
-        params = {
-            'video_id': request.form.get('video_id'),
-            'confidence': float(request.form.get('confidence', 0.4)),
-            'frame_skip': int(request.form.get('frame_skip', 15)),
-            'team_left': request.form.get('team_left', 'Equipe A'),
-            'team_right': request.form.get('team_right', 'Equipe B'),
-            'setter_start_left': request.form.get('setter_start_left', 'P1'),
-            'setter_start_right': request.form.get('setter_start_right', 'P1'),
-            'first_serve': request.form.get('first_serve', 'left'),
-        }
-    else:
-        data = request.get_json() or {}
-        video_url = data.get('video_url')
-        if video_url:
-            # Pass URL directly — download will happen in the background thread
-            video_path = video_url
-        elif data.get('video_path') and os.path.exists(data['video_path']):
-            video_path = data['video_path']
-        params = {
-            'video_id': data.get('video_id'),
-            'confidence': float(data.get('confidence', 0.4)),
-            'frame_skip': int(data.get('frame_skip', 15)),
-            'team_left': data.get('team_left', 'Equipe A'),
-            'team_right': data.get('team_right', 'Equipe B'),
-            'setter_start_left': data.get('setter_start_left', 'P1'),
-            'setter_start_right': data.get('setter_start_right', 'P1'),
-            'first_serve': data.get('first_serve', 'left'),
-        }
-
-    if not video_path:
-        return jsonify({'error': 'Pas de video fournie. Envoyez un fichier ou video_url.'}), 400
-
-    analysis_id = uuid.uuid4().hex[:12]
-    analyses[analysis_id] = {
-        'id': analysis_id, 'status': 'queued', 'progress': 'En attente...',
-        'percent': 0, 'results': None, 'detected_points': None, 'error': None,
+    return {
+        "status": "ok",
+        "service": "CourtVision v2 — VideoMAE + YOLO API",
+        "supabase_connected": supabase_client is not None,
     }
 
-    thread = threading.Thread(target=run_analysis, args=(analysis_id, video_path, params), daemon=True)
+
+@app.post("/api/analyze")
+async def start_analysis_endpoint(
+    video_url: str = Form(None),
+    video_id: str = Form(None),
+    team_left: str = Form("Equipe A"),
+    team_right: str = Form("Equipe B"),
+    setter_start_left: str = Form("P1"),
+    setter_start_right: str = Form("P1"),
+    first_serve: str = Form("left"),
+    video: UploadFile = File(None),
+):
+    """Lancer une analyse. Accepte: upload ou video_url."""
+    video_path = None
+    params = dict(
+        video_id=video_id, team_left=team_left, team_right=team_right,
+        setter_start_left=setter_start_left, setter_start_right=setter_start_right,
+        first_serve=first_serve, use_gpu=False,
+    )
+
+    if video is not None:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{video.filename}")
+        with open(video_path, 'wb') as f:
+            content = await video.read()
+            f.write(content)
+    elif video_url:
+        video_path = video_url  # sera téléchargé dans le thread
+    else:
+        raise HTTPException(400, "Pas de vidéo fournie (video_url ou fichier)")
+
+    aid = uuid.uuid4().hex[:12]
+    analyses[aid] = dict(id=aid, status='queued', progress='En attente...', percent=0,
+                         results=None, detected_points=None, error=None)
+    thread = threading.Thread(target=run_analysis, args=(aid, video_path, params), daemon=True)
     thread.start()
+    return JSONResponse({"analysis_id": aid, "status": "queued", "video_id": video_id}, 202)
 
-    return jsonify({'analysis_id': analysis_id, 'status': 'queued', 'video_id': params.get('video_id')}), 202
+
+# Aussi accepter du JSON brut
+@app.post("/api/analyze/json")
+async def start_analysis_json(body: dict):
+    """Lancer une analyse via JSON body."""
+    video_url = body.get('video_url')
+    if not video_url:
+        raise HTTPException(400, "video_url requis")
+
+    params = {
+        'video_id': body.get('video_id'),
+        'team_left': body.get('team_left', 'Equipe A'),
+        'team_right': body.get('team_right', 'Equipe B'),
+        'setter_start_left': body.get('setter_start_left', 'P1'),
+        'setter_start_right': body.get('setter_start_right', 'P1'),
+        'first_serve': body.get('first_serve', 'left'),
+        'use_gpu': False,
+    }
+
+    aid = uuid.uuid4().hex[:12]
+    analyses[aid] = dict(id=aid, status='queued', progress='En attente...', percent=0,
+                         results=None, detected_points=None, error=None)
+    thread = threading.Thread(target=run_analysis, args=(aid, video_url, params), daemon=True)
+    thread.start()
+    return JSONResponse({"analysis_id": aid, "status": "queued", "video_id": params.get('video_id')}, 202)
 
 
-@app.route('/api/analyze/<analysis_id>', methods=['GET'])
-def get_analysis(analysis_id):
+@app.get("/api/analyze/{analysis_id}")
+def get_analysis(analysis_id: str):
     if analysis_id not in analyses:
-        return jsonify({'error': 'Analyse non trouvee'}), 404
+        raise HTTPException(404, "Analyse non trouvée")
     a = analyses[analysis_id]
-    resp = {'id': analysis_id, 'status': a['status'], 'progress': a['progress'], 'percent': a.get('percent', 0)}
+    resp = {"id": analysis_id, "status": a['status'], "progress": a['progress'], "percent": a.get('percent', 0)}
     if a['status'] == 'completed':
         resp['detected_points'] = a['detected_points']
     elif a['status'] == 'error':
         resp['error'] = a['error']
-    return jsonify(resp)
+    return resp
 
 
-@app.route('/api/analyses', methods=['GET'])
+@app.get("/api/analyses")
 def list_analyses():
-    """Debug: lister toutes les analyses en mémoire."""
-    return jsonify({
-        'count': len(analyses),
-        'analyses': [
-            {
-                'id': a['id'],
-                'status': a['status'],
-                'progress': a['progress'],
-                'percent': a.get('percent', 0),
-                'error': a.get('error'),
-            }
+    return {
+        "count": len(analyses),
+        "analyses": [
+            {"id": a['id'], "status": a['status'], "progress": a['progress'],
+             "percent": a.get('percent', 0), "error": a.get('error')}
             for a in analyses.values()
         ]
-    })
+    }
 
 
-@app.route('/api/test-supabase/<video_id>', methods=['POST'])
-def test_supabase(video_id):
-    """Debug: tester la mise à jour Supabase directement."""
-    if not supabase_client:
-        return jsonify({'error': 'Supabase non connecté'}), 500
-    try:
-        result = supabase_client.table("videos").update({"progress": 1}).eq("id", video_id).execute()
-        return jsonify({'success': True, 'data': str(result.data), 'count': len(result.data) if result.data else 0})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 5000)))
-    args = parser.parse_args()
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print(f"\n🏐 CourtVision YOLO Volleyball API - http://localhost:{args.port}/api/health\n")
-    app.run(host='0.0.0.0', port=args.port, debug=False)
+    port = int(os.environ.get('PORT', 8000))
+    print(f"\n🏐 CourtVision v2 API — http://localhost:{port}/api/health\n")
+    uvicorn.run(app, host='0.0.0.0', port=port)

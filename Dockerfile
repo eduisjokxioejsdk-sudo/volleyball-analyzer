@@ -1,30 +1,24 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
+
+# Dépendances système pour OpenCV et git (pour pip install from github)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx libglib2.0-0 ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install system deps for OpenCV + SSL certificates + git-lfs
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 git git-lfs ffmpeg ca-certificates \
-    && update-ca-certificates \
-    && git lfs install \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python deps FIRST (cached layer - heaviest step)
+# Copier requirements et installer les dépendances Python
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Clone VolleyVision with LFS (model weights are .pt files)
-RUN git clone --depth 1 https://github.com/shukkkur/VolleyVision.git /app/VolleyVision \
-    && cd /app/VolleyVision && git lfs pull \
-    && echo "Model files:" && find /app/VolleyVision -name "best.pt" -exec ls -lh {} \;
+# Copier le code source (ml_manager + scripts)
+COPY ml_manager/ ./ml_manager/
+COPY analyze_video.py .
+COPY api_server.py .
 
-# Copy app code (changes often → last layer)
-COPY analyze_video.py api_server.py ./
+# Port exposé pour l'API
+EXPOSE 8000
 
-# Update model paths to use /app/VolleyVision
-ENV VOLLEYVISION_DIR=/app/VolleyVision
-ENV PORT=8080
-
-EXPOSE 8080
-
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "600", "--workers", "1", "--threads", "2", "api_server:app"]
+# Lancer le serveur API
+CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000"]
