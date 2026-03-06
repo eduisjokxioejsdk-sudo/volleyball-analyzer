@@ -536,7 +536,7 @@ class VolleyballAnalyzer:
         - Fin du point   = dernière action YOLO avant le service suivant + 4 secondes
         - Dernier point  = dernière action après le dernier service + 4 secondes
         """
-        BUFFER_AFTER_LAST_ACTION = 2.0  # secondes après la dernière action
+        BUFFER_AFTER_LAST_ACTION = 0.0  # pas de buffer après la dernière action
 
         for i, serve in enumerate(serves):
             # Début du point : directement au service
