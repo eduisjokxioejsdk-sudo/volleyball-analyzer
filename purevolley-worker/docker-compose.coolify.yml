@@ -1,0 +1,84 @@
+# PureVolley Worker - Configuration optimisée pour Coolify avec GPU AMD RX 6600
+# À utiliser dans Coolify comme configuration Docker Compose
+
+version: '3.8'
+
+services:
+  purevolley-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: purevolley-worker
+    restart: unless-stopped
+    
+    # Configuration GPU pour AMD RX 6600 avec ROCm 6.1
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    
+    # Groupes nécessaires pour l'accès GPU
+    group_add:
+      - video
+      - render
+    
+    # Variables d'environnement critiques
+    environment:
+      # GPU Configuration
+      - HSA_OVERRIDE_GFX_VERSION=10.3.0
+      - ROCM_PATH=/opt/rocm
+      - HIP_VISIBLE_DEVICES=0
+      
+      # Supabase Configuration
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      
+      # Wasabi S3 Configuration
+      - WASABI_ACCESS_KEY=${WASABI_ACCESS_KEY}
+      - WASABI_SECRET_KEY=${WASABI_SECRET_KEY}
+      - WASABI_BUCKET=${WASABI_BUCKET:-purevolley}
+      - WASABI_REGION=${WASABI_REGION:-us-east-1}
+      - WASABI_ENDPOINT=${WASABI_ENDPOINT:-https://s3.wasabisys.com}
+      
+      # Worker Configuration
+      - POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS:-30}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Health check configuration
+      - HEALTH_CHECK_ENABLED=${HEALTH_CHECK_ENABLED:-true}
+      - HEALTH_CHECK_PORT=${HEALTH_CHECK_PORT:-8080}
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; exit(0 if torch.cuda.is_available() else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Resource limits
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: rocm
+              count: 1
+              capabilities: [gpu]
+
+# Volumes optionnels pour la persistance
+volumes:
+  worker-logs:
+    driver: local
+
+# Networks (Coolify gère généralement le réseau)
+networks:
+  default:
+    external: true
+    name: coolify-network
