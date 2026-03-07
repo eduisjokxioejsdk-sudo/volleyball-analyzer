@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+TestOutput/
+VolleyVision/
+venv/
+.venv/
+
+# Model weights (auto-downloaded at runtime)
+weights/
+*.pt
+
+# Duplicate repo clone
+ml_manager_repo/
+ml_manager/.git/
+
+# Output
+Output/
