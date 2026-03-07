@@ -1,0 +1,38 @@
+# PureVolley Worker - Dépendances Python avec support ROCm 6.1
+# Généré pour AMD Radeon RX 6600 (HSA_OVERRIDE_GFX_VERSION=10.3.0)
+
+# Backend et stockage
+supabase>=2.3.0
+boto3>=1.34.0
+python-dotenv>=1.0.0
+
+# Traitement vidéo
+opencv-python>=4.9.0
+opencv-python-headless>=4.9.0  # Alternative pour les environnements sans GUI
+
+# PyTorch avec ROCm 6.1
+# Installation via pip avec l'index ROCm
+--extra-index-url https://download.pytorch.org/whl/rocm6.1
+torch>=2.3.0
+torchvision>=0.18.0
+torchaudio>=2.3.0
+
+# Utilitaires
+numpy>=1.24.0
+pandas>=2.0.0
+tqdm>=4.66.0
+pillow>=10.0.0
+requests>=2.31.0
+
+# Logging et monitoring
+loguru>=0.7.0
+psutil>=5.9.0
+
+# Pour le futur traitement VideoMAE
+transformers>=4.36.0
+timm>=0.9.0
+
+# Dépendances de développement (optionnel)
+black>=24.0.0
+flake8>=6.0.0
+mypy>=1.8.0
