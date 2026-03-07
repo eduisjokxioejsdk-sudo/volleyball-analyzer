@@ -1,0 +1,69 @@
+{
+  "name": "purevolley-worker",
+  "type": "application",
+  "repository": "https://github.com/eduisjokxioejsdk-sudo/volleyball-analyzer",
+  "branch": "master",
+  "build": {
+    "type": "dockerfile",
+    "dockerfile": "purevolley-worker/Dockerfile",
+    "context": "purevolley-worker"
+  },
+  "deploy": {
+    "type": "docker",
+    "dockerCompose": {
+      "file": "purevolley-worker/docker-compose.coolify.yml",
+      "service": "purevolley-worker"
+    }
+  },
+  "environment": {
+    "SUPABASE_URL": "https://your-project.supabase.co",
+    "SUPABASE_SERVICE_ROLE_KEY": "your-service-role-key-here",
+    "WASABI_ACCESS_KEY": "your-wasabi-access-key",
+    "WASABI_SECRET_KEY": "your-wasabi-secret-key",
+    "WASABI_BUCKET": "purevolley",
+    "WASABI_REGION": "us-east-1",
+    "WASABI_ENDPOINT": "https://s3.wasabisys.com",
+    "HSA_OVERRIDE_GFX_VERSION": "10.3.0",
+    "ROCM_PATH": "/opt/rocm",
+    "POLL_INTERVAL_SECONDS": "30",
+    "MAX_RETRIES": "3",
+    "LOG_LEVEL": "INFO"
+  },
+  "docker": {
+    "devices": [
+      "/dev/kfd",
+      "/dev/dri"
+    ],
+    "groupAdd": [
+      "video",
+      "render"
+    ],
+    "privileged": false,
+    "network": "host"
+  },
+  "resources": {
+    "cpu": 2,
+    "memory": 4096,
+    "gpu": {
+      "enabled": true,
+      "type": "rocm",
+      "count": 1
+    }
+  },
+  "healthCheck": {
+    "enabled": true,
+    "path": "/health",
+    "port": 8080,
+    "interval": 30,
+    "timeout": 10,
+    "retries": 3
+  },
+  "domains": [
+    {
+      "domain": "purevolley-worker.your-domain.com",
+      "https": true,
+      "port": 8080
+    }
+  ],
+  "notes": "PureVolley Worker - Système de découpage de matchs de volley par IA sur AMD RX 6600 avec ROCm 6.1"
+}
