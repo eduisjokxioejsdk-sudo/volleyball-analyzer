@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
 """
-PureVolley Worker - Système de découpage de matchs de volley par IA
-Worker local tournant sur PC Ubuntu avec carte graphique AMD RX 6600 (ROCm 6.1)
-
-Fonctionnalités :
-1. Connexion à Supabase pour surveiller les matchs avec status='pending'
-2. Téléchargement des vidéos depuis Wasabi S3
-3. Vérification de la disponibilité GPU (RX 6600 avec ROCm)
-4. Simulation de traitement (5 secondes)
-5. Mise à jour du statut dans Supabase
-6. Upload de logs sur Wasabi S3
+PureVolley Worker - Analyse GPU de vidéos de volley
+====================================================
+Surveille la table 'videos' dans Supabase (status='PROCESSING'),
+télécharge la vidéo depuis Wasabi S3, exécute l'analyse IA avec GPU,
+et met à jour les résultats dans Supabase.
 """
 
 import os
 import sys
 import time
+import json
 import logging
 import tempfile
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import boto3
+import requests
 from botocore.exceptions import ClientError
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import torch
-import cv2
 
 # Configuration du logging
 logging.basicConfig(
@@ -43,374 +39,334 @@ logger = logging.getLogger(__name__)
 # Chargement des variables d'environnement
 load_dotenv()
 
+# Ajouter le dossier parent au path pour importer ml_manager et analyze_video
+WORKER_DIR = Path(__file__).parent
+sys.path.insert(0, str(WORKER_DIR))
+
+# Lazy import de VolleyballAnalyzer
+VolleyballAnalyzer = None
+
+ROTATION_ORDER = ['P1', 'P6', 'P5', 'P4', 'P3', 'P2']
+
+
+def _position_to_number(pos_str):
+    try:
+        return int(pos_str.replace('P', ''))
+    except Exception:
+        return 1
+
+
 class PureVolleyWorker:
-    """Worker principal pour le traitement des vidéos de volley."""
-    
+    """Worker principal pour le traitement GPU des vidéos de volley."""
+
     def __init__(self):
-        """Initialise le worker avec les connexions aux services."""
         self.supabase: Optional[Client] = None
         self.s3_client = None
         self.gpu_available = False
         self.initialize_services()
         self.check_gpu()
-    
+        self.ensure_models()
+
     def initialize_services(self):
         """Initialise les connexions à Supabase et Wasabi S3."""
         try:
-            # Connexion à Supabase
             supabase_url = os.getenv('SUPABASE_URL')
             supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-            
             if not supabase_url or not supabase_key:
-                raise ValueError("Variables d'environnement Supabase manquantes")
-            
+                raise ValueError("Variables SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY manquantes")
             self.supabase = create_client(supabase_url, supabase_key)
             logger.info("✅ Connexion à Supabase établie")
-            
-            # Connexion à Wasabi S3
-            wasabi_access_key = os.getenv('WASABI_ACCESS_KEY')
-            wasabi_secret_key = os.getenv('WASABI_SECRET_KEY')
-            wasabi_endpoint = os.getenv('WASABI_ENDPOINT', 'https://s3.wasabisys.com')
-            wasabi_region = os.getenv('WASABI_REGION', 'us-east-1')
-            
-            if not wasabi_access_key or not wasabi_secret_key:
-                raise ValueError("Variables d'environnement Wasabi manquantes")
-            
+
+            wasabi_access = os.getenv('WASABI_ACCESS_KEY')
+            wasabi_secret = os.getenv('WASABI_SECRET_KEY')
+            wasabi_endpoint = os.getenv('WASABI_ENDPOINT', 'https://s3.eu-west-2.wasabisys.com')
+            wasabi_region = os.getenv('WASABI_REGION', 'eu-west-2')
+            if not wasabi_access or not wasabi_secret:
+                raise ValueError("Variables WASABI_ACCESS_KEY / WASABI_SECRET_KEY manquantes")
             self.s3_client = boto3.client(
-                's3',
-                endpoint_url=wasabi_endpoint,
-                region_name=wasabi_region,
-                aws_access_key_id=wasabi_access_key,
-                aws_secret_access_key=wasabi_secret_key
+                's3', endpoint_url=wasabi_endpoint, region_name=wasabi_region,
+                aws_access_key_id=wasabi_access, aws_secret_access_key=wasabi_secret
             )
+            self.wasabi_bucket = os.getenv('WASABI_BUCKET', 'courtvision')
             logger.info("✅ Connexion à Wasabi S3 établie")
-            
         except Exception as e:
-            logger.error(f"❌ Erreur lors de l'initialisation des services: {e}")
+            logger.error(f"❌ Erreur initialisation: {e}")
             raise
-    
+
     def check_gpu(self):
-        """Vérifie la disponibilité du GPU AMD RX 6600 avec ROCm."""
+        """Vérifie la disponibilité GPU."""
         try:
             self.gpu_available = torch.cuda.is_available()
-            
             if self.gpu_available:
-                gpu_count = torch.cuda.device_count()
                 gpu_name = torch.cuda.get_device_name(0)
-                logger.info(f"✅ GPU disponible: {gpu_name}")
-                logger.info(f"   Nombre de GPU: {gpu_count}")
-                logger.info(f"   Version PyTorch: {torch.__version__}")
-                logger.info(f"   Version CUDA: {torch.version.cuda}")
-                
-                # Vérification spécifique pour ROCm
-                if hasattr(torch, 'version') and hasattr(torch.version, 'hip'):
-                    logger.info(f"   Version ROCm/HIP: {torch.version.hip}")
+                logger.info(f"✅ GPU: {gpu_name} | PyTorch {torch.__version__} | CUDA {torch.version.cuda}")
             else:
-                logger.warning("⚠️  Aucun GPU disponible - Le traitement sera exécuté sur CPU")
-                
+                logger.warning("⚠️ Pas de GPU - CPU uniquement")
         except Exception as e:
-            logger.error(f"❌ Erreur lors de la vérification GPU: {e}")
+            logger.error(f"❌ Erreur GPU: {e}")
             self.gpu_available = False
-    
-    def get_pending_matches(self):
-        """Récupère les matchs avec status='pending' depuis Supabase."""
+
+    def ensure_models(self):
+        """Télécharge les poids ML si nécessaire."""
+        weights_dir = WORKER_DIR / "weights"
+        if not weights_dir.exists() or not any(weights_dir.rglob("*.pt")):
+            logger.info("📦 Téléchargement des poids ML depuis Google Drive...")
+            try:
+                import gdown
+                import zipfile
+                weights_dir.mkdir(exist_ok=True)
+                zip_path = weights_dir / "all_weights.zip"
+                gdown.download(id='1__zkTmGwZo2z0EgbJvC14I_3kOpgQx3o', output=str(zip_path), quiet=False)
+                with zipfile.ZipFile(zip_path, 'r') as z:
+                    z.extractall(weights_dir)
+                zip_path.unlink()
+                logger.info("✅ Poids ML installés")
+            except Exception as e:
+                logger.error(f"❌ Erreur téléchargement poids: {e}")
+        else:
+            logger.info("✅ Poids ML déjà présents")
+
+    def get_pending_videos(self) -> List[Dict]:
+        """Récupère les vidéos avec status='PROCESSING' depuis Supabase."""
         try:
-            response = self.supabase.table('matches')\
-                .select('*')\
-                .eq('status', 'pending')\
-                .order('created_at', desc=False)\
-                .limit(10)\
+            response = self.supabase.table('videos') \
+                .select('*') \
+                .eq('status', 'PROCESSING') \
+                .order('created_at', desc=False) \
+                .limit(5) \
                 .execute()
-            
-            matches = response.data if hasattr(response, 'data') else []
-            logger.info(f"📊 {len(matches)} match(s) en attente trouvé(s)")
-            return matches
-            
+            videos = response.data if hasattr(response, 'data') else []
+            if videos:
+                logger.info(f"📊 {len(videos)} vidéo(s) à traiter trouvée(s)")
+            return videos
         except Exception as e:
-            logger.error(f"❌ Erreur lors de la récupération des matchs: {e}")
+            logger.error(f"❌ Erreur récupération vidéos: {e}")
             return []
-    
-    def download_video_from_s3(self, video_url: str, local_path: Path) -> bool:
-        """
-        Télécharge une vidéo depuis Wasabi S3.
-        
-        Args:
-            video_url: URL S3 de la vidéo
-            local_path: Chemin local où sauvegarder la vidéo
-            
-        Returns:
-            bool: True si le téléchargement a réussi
-        """
+
+    def update_video(self, video_id: str, status: str, progress: int, points_data=None):
+        """Met à jour le statut d'une vidéo dans Supabase."""
         try:
-            # Extraction du bucket et de la clé depuis l'URL
-            # Format attendu: s3://bucket-name/path/to/video.mp4
-            if video_url.startswith('s3://'):
-                bucket_key = video_url[5:]  # Retire 's3://'
-                parts = bucket_key.split('/', 1)
-                if len(parts) == 2:
-                    bucket, key = parts
-                else:
-                    bucket = os.getenv('WASABI_BUCKET', 'purevolley')
-                    key = parts[0]
+            data = {"status": status, "progress": progress}
+            if points_data is not None:
+                data["points_data"] = points_data
+            self.supabase.table('videos').update(data).eq('id', video_id).execute()
+            logger.info(f"📝 Video {video_id[:8]}... → {status} ({progress}%)")
+        except Exception as e:
+            logger.error(f"❌ Erreur update Supabase: {e}")
+
+    def download_video(self, video_url: str, local_path: Path) -> bool:
+        """Télécharge une vidéo depuis Wasabi S3 ou URL directe."""
+        try:
+            if video_url.startswith('http'):
+                # Téléchargement depuis URL (presigned URL ou URL directe)
+                logger.info(f"⬇️ Téléchargement depuis URL: {video_url[:80]}...")
+                r = requests.get(video_url, stream=True, timeout=600)
+                r.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
             else:
-                # Supposons que c'est juste la clé S3
-                bucket = os.getenv('WASABI_BUCKET', 'purevolley')
-                key = video_url
-            
-            logger.info(f"📥 Téléchargement depuis S3: bucket={bucket}, key={key}")
-            
-            # Téléchargement du fichier
-            self.s3_client.download_file(bucket, key, str(local_path))
-            
-            # Vérification que le fichier existe et n'est pas vide
-            if local_path.exists() and local_path.stat().st_size > 0:
-                logger.info(f"✅ Vidéo téléchargée: {local_path} ({local_path.stat().st_size} bytes)")
-                return True
+                # Clé S3 directe
+                logger.info(f"⬇️ Téléchargement depuis S3: {video_url}")
+                self.s3_client.download_file(self.wasabi_bucket, video_url, str(local_path))
+
+            size_mb = local_path.stat().st_size / (1024 * 1024)
+            logger.info(f"✅ Vidéo téléchargée: {size_mb:.1f} MB")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Erreur téléchargement: {e}")
+            return False
+
+    def run_analysis(self, video_path: Path, video_data: Dict) -> List[Dict]:
+        """Exécute l'analyse VolleyballAnalyzer avec GPU."""
+        global VolleyballAnalyzer
+
+        # Lazy import
+        if VolleyballAnalyzer is None:
+            logger.info("📦 Import de VolleyballAnalyzer (torch + transformers)...")
+            try:
+                from analyze_video import VolleyballAnalyzer as _VA
+                VolleyballAnalyzer = _VA
+                logger.info("✅ VolleyballAnalyzer importé")
+            except ImportError as e:
+                logger.error(f"❌ Impossible d'importer VolleyballAnalyzer: {e}")
+                logger.info("🔄 Fallback: détection basique par intervalle")
+                return self._fallback_analysis(video_path, video_data)
+
+        video_id = video_data.get('id', 'unknown')
+        team_left = video_data.get('team_a_name', 'Équipe A')
+        team_right = video_data.get('team_b_name', 'Équipe B')
+        serving_team = video_data.get('serving_team', 'A')
+        initial_rotation = video_data.get('initial_rotation', 1)
+        first_serve = 'left' if serving_team == 'A' else 'right'
+        setter_start = ROTATION_ORDER[initial_rotation - 1] if 1 <= initial_rotation <= 6 else 'P1'
+
+        output_dir = Path(tempfile.mkdtemp(prefix=f"cv_{video_id[:8]}_"))
+
+        try:
+            analyzer = VolleyballAnalyzer(
+                video_path=str(video_path),
+                output_dir=str(output_dir),
+                team_left=team_left,
+                team_right=team_right,
+                setter_start_left=setter_start,
+                setter_start_right='P1',
+                first_serve=first_serve,
+                use_gpu=self.gpu_available,
+            )
+
+            def on_progress(pct):
+                global_pct = 5 + int(pct * 0.90)
+                self.update_video(video_id, "PROCESSING", global_pct)
+
+            self.update_video(video_id, "PROCESSING", 5)
+            analyzer.run(progress_callback=on_progress)
+
+            # Lire les résultats
+            results_path = output_dir / "analysis_results.json"
+            if results_path.exists():
+                with open(results_path, 'r', encoding='utf-8') as f:
+                    results = json.load(f)
+
+                detected_points = []
+                for rally in results.get('rallies', []):
+                    rot = rally.get('rotation', {})
+                    detected_points.append({
+                        'id': rally['rally_num'],
+                        'startTime': rally['start_time'],
+                        'endTime': rally['end_time'],
+                        'label': f"Point {rally['rally_num']}",
+                        'winner': 'A' if rally['scored_by'] == team_left else 'B' if rally['scored_by'] == team_right else None,
+                        'servingTeamAtStart': 'A' if rot.get('serving_team') == team_left else 'B',
+                        'rotationAtStart': _position_to_number(rot.get('setter_left', 'P1')),
+                    })
+                logger.info(f"🏐 Analyse terminée: {len(detected_points)} points détectés")
+                return detected_points
             else:
-                logger.error(f"❌ Fichier téléchargé vide ou inexistant: {local_path}")
-                return False
-                
-        except ClientError as e:
-            logger.error(f"❌ Erreur S3 lors du téléchargement: {e}")
-            return False
+                logger.warning("⚠️ Pas de fichier résultats trouvé")
+                return []
+
         except Exception as e:
-            logger.error(f"❌ Erreur inattendue lors du téléchargement: {e}")
-            return False
-    
-    def process_video(self, video_path: Path, match_id: str) -> Dict[str, Any]:
-        """
-        Traite une vidéo de match de volley.
-        
-        Args:
-            video_path: Chemin vers la vidéo à traiter
-            match_id: ID du match dans Supabase
-            
-        Returns:
-            Dict contenant les résultats du traitement
-        """
-        logger.info(f"🎬 Début du traitement pour le match {match_id}")
-        
-        try:
-            # 1. Vérification de base de la vidéo avec OpenCV
-            cap = cv2.VideoCapture(str(video_path))
-            if not cap.isOpened():
-                raise ValueError(f"Impossible d'ouvrir la vidéo: {video_path}")
-            
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            duration = frame_count / fps if fps > 0 else 0
-            
-            logger.info(f"   📹 Informations vidéo: {frame_count} frames, {fps:.2f} FPS, {duration:.2f} secondes")
-            cap.release()
-            
-            # 2. Simulation de traitement IA (5 secondes)
-            logger.info("   🤖 Simulation de traitement IA (5 secondes)...")
-            start_time = time.time()
-            
-            # Simulation de travail sur GPU si disponible
-            if self.gpu_available:
-                # Création d'un tenseur sur GPU pour tester
-                test_tensor = torch.randn(1000, 1000, device='cuda')
-                # Opération simple pour vérifier le GPU
-                result = test_tensor @ test_tensor.T
-                logger.info(f"   🚀 Opération GPU testée: {result.shape}")
-            
-            # Attente de 5 secondes pour simuler le traitement
-            time.sleep(5)
-            
-            processing_time = time.time() - start_time
-            logger.info(f"   ⏱️  Temps de traitement simulé: {processing_time:.2f} secondes")
-            
-            # 3. Génération de résultats simulés
-            results = {
-                'match_id': match_id,
-                'processing_time': processing_time,
-                'video_duration': duration,
-                'frame_count': frame_count,
-                'fps': fps,
-                'gpu_used': self.gpu_available,
-                'detected_rallies': 12,  # Simulation
-                'detected_actions': 45,  # Simulation
-                'processing_date': datetime.utcnow().isoformat(),
-                'status': 'completed'
-            }
-            
-            logger.info(f"✅ Traitement terminé pour le match {match_id}")
-            return results
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur lors du traitement de la vidéo: {e}")
-            raise
-    
-    def update_match_status(self, match_id: str, status: str, results: Dict[str, Any] = None):
-        """
-        Met à jour le statut d'un match dans Supabase.
-        
-        Args:
-            match_id: ID du match
-            status: Nouveau statut ('processing', 'completed', 'failed')
-            results: Résultats du traitement à sauvegarder
-        """
-        try:
-            update_data = {
-                'status': status,
-                'updated_at': datetime.utcnow().isoformat()
-            }
-            
-            if results:
-                # Ajout des résultats au champ metadata ou création d'un champ dédié
-                update_data['metadata'] = results
-            
-            response = self.supabase.table('matches')\
-                .update(update_data)\
-                .eq('id', match_id)\
-                .execute()
-            
-            logger.info(f"📝 Statut du match {match_id} mis à jour: {status}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur lors de la mise à jour du statut: {e}")
-            return False
-    
-    def upload_log_to_s3(self, log_content: str, match_id: str) -> bool:
-        """
-        Upload un fichier de log sur Wasabi S3.
-        
-        Args:
-            log_content: Contenu du log
-            match_id: ID du match pour le nom du fichier
-            
-        Returns:
-            bool: True si l'upload a réussi
-        """
-        try:
-            bucket = os.getenv('WASABI_BUCKET', 'purevolley')
-            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-            log_key = f"logs/match_{match_id}_{timestamp}.log"
-            
-            # Création d'un fichier temporaire
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False) as f:
-                f.write(log_content)
-                temp_log_path = f.name
-            
-            # Upload vers S3
-            self.s3_client.upload_file(temp_log_path, bucket, log_key)
-            
-            # Nettoyage du fichier temporaire
-            os.unlink(temp_log_path)
-            
-            logger.info(f"📤 Log uploadé sur S3: {log_key}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur lors de l'upload du log: {e}")
-            return False
-    
-    def process_single_match(self, match: Dict[str, Any]) -> bool:
-        """
-        Traite un seul match de bout en bout.
-        
-        Args:
-            match: Dictionnaire contenant les données du match
-            
-        Returns:
-            bool: True si le traitement a réussi
-        """
-        match_id = match.get('id')
-        video_url = match.get('video_url')
-        
-        if not match_id or not video_url:
-            logger.error(f"❌ Données de match incomplètes: {match}")
-            return False
-        
-        logger.info(f"🔍 Traitement du match {match_id}")
-        
-        try:
-            # 1. Mise à jour du statut à 'processing'
-            self.update_match_status(match_id, 'processing')
-            
-            # 2. Téléchargement de la vidéo
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
-                temp_video_path = Path(temp_file.name)
-            
-            if not self.download_video_from_s3(video_url, temp_video_path):
-                self.update_match_status(match_id, 'failed')
-                return False
-            
-            # 3. Traitement de la vidéo
-            results = self.process_video(temp_video_path, match_id)
-            
-            # 4. Mise à jour du statut à 'completed'
-            self.update_match_status(match_id, 'completed', results)
-            
-            # 5. Upload d'un log de confirmation
-            log_content = f"Traitement réussi pour le match {match_id}\n"
-            log_content += f"Date: {datetime.utcnow().isoformat()}\n"
-            log_content += f"Résultats: {results}\n"
-            self.upload_log_to_s3(log_content, match_id)
-            
-            # 6. Nettoyage du fichier temporaire
-            if temp_video_path.exists():
-                temp_video_path.unlink()
-            
-            logger.info(f"🎉 Match {match_id} traité avec succès!")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur lors du traitement du match {match_id}: {e}")
+            logger.error(f"❌ Erreur analyse: {e}")
             logger.error(traceback.format_exc())
-            
-            # Mise à jour du statut à 'failed'
-            self.update_match_status(match_id, 'failed')
-            
-            # Upload du log d'erreur
-            error_log = f"Erreur lors du traitement du match {match_id}\n"
-            error_log += f"Date: {datetime.utcnow().isoformat()}\n"
-            error_log += f"Erreur: {str(e)}\n"
-            error_log += f"Traceback: {traceback.format_exc()}\n"
-            self.upload_log_to_s3(error_log, match_id)
-            
+            logger.info("🔄 Fallback: détection basique")
+            return self._fallback_analysis(video_path, video_data)
+        finally:
+            # Cleanup
+            import shutil
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+    def _fallback_analysis(self, video_path: Path, video_data: Dict) -> List[Dict]:
+        """Analyse basique si les modèles ML ne sont pas disponibles."""
+        import cv2
+        logger.info("🔧 Analyse fallback: découpage par intervalle régulier")
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps > 0 else 0
+        cap.release()
+
+        # Découper en segments de ~30 secondes comme approximation de points
+        segment_duration = 30.0
+        points = []
+        current_time = 5.0  # Commencer à 5s
+
+        serving_team = video_data.get('serving_team', 'A')
+        rotation = video_data.get('initial_rotation', 1)
+
+        while current_time + segment_duration < duration - 5:
+            points.append({
+                'id': len(points) + 1,
+                'startTime': round(current_time, 1),
+                'endTime': round(current_time + segment_duration, 1),
+                'label': f"Point {len(points) + 1}",
+                'winner': None,
+                'servingTeamAtStart': serving_team,
+                'rotationAtStart': rotation,
+            })
+            current_time += segment_duration + 5  # 5s de pause entre points
+
+        logger.info(f"📊 Fallback: {len(points)} segments créés ({segment_duration}s chacun)")
+        return points
+
+    def process_video(self, video_data: Dict) -> bool:
+        """Traite une vidéo de bout en bout."""
+        video_id = video_data.get('id')
+        video_url = video_data.get('video_url')
+
+        if not video_id or not video_url:
+            logger.error(f"❌ Données vidéo incomplètes: {video_data}")
             return False
-    
+
+        logger.info(f"🎬 Traitement vidéo {video_id[:8]}... - {video_data.get('title', 'Sans titre')}")
+
+        try:
+            # 1. Update status
+            self.update_video(video_id, "PROCESSING", 1)
+
+            # 2. Télécharger la vidéo
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
+                temp_path = Path(f.name)
+
+            if not self.download_video(video_url, temp_path):
+                self.update_video(video_id, "ERROR", 0)
+                return False
+
+            self.update_video(video_id, "PROCESSING", 3)
+
+            # 3. Lancer l'analyse
+            detected_points = self.run_analysis(temp_path, video_data)
+
+            # 4. Mettre à jour Supabase
+            self.update_video(video_id, "READY", 100, detected_points)
+            logger.info(f"🎉 Vidéo {video_id[:8]}... terminée: {len(detected_points)} points!")
+
+            # 5. Cleanup
+            if temp_path.exists():
+                temp_path.unlink()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Erreur traitement vidéo {video_id[:8]}...: {e}")
+            logger.error(traceback.format_exc())
+            self.update_video(video_id, "ERROR", 0)
+            if 'temp_path' in locals() and temp_path.exists():
+                temp_path.unlink()
+            return False
+
     def run(self):
         """Boucle principale du worker."""
         logger.info("🚀 Démarrage du PureVolley Worker")
-        logger.info(f"   GPU disponible: {self.gpu_available}")
-        logger.info(f"   PyTorch version: {torch.__version__}")
-        
-        poll_interval = 30  # secondes entre chaque vérification
-        
+        logger.info(f"   GPU: {self.gpu_available} | PyTorch: {torch.__version__}")
+
+        poll_interval = 15  # secondes
+
         while True:
             try:
-                logger.info("🔎 Vérification des matchs en attente...")
-                
-                # Récupération des matchs en attente
-                pending_matches = self.get_pending_matches()
-                
-                if pending_matches:
-                    for match in pending_matches:
-                        success = self.process_single_match(match)
-                        if not success:
-                            logger.warning(f"⚠️  Échec du traitement pour le match {match.get('id')}")
-                
+                pending = self.get_pending_videos()
+                if pending:
+                    for video in pending:
+                        self.process_video(video)
                 else:
-                    logger.info(f"😴 Aucun match en attente. Attente de {poll_interval} secondes...")
-                
-                # Attente avant la prochaine vérification
-                time.sleep(poll_interval)
-                
-            except KeyboardInterrupt:
-                logger.info("👋 Arrêt demandé par l'utilisateur")
-                break
-            except Exception as e:
-                logger.error(f"❌ Erreur dans la boucle principale: {e}")
-                logger.error(traceback.format_exc())
-                logger.info(f"⏳ Nouvelle tentative dans {poll_interval} secondes...")
+                    logger.debug(f"😴 Aucune vidéo en attente. Attente {poll_interval}s...")
+
                 time.sleep(poll_interval)
 
-def main():
-    """Point d'entrée principal."""
+            except KeyboardInterrupt:
+                logger.info("👋 Arrêt demandé")
+                break
+            except Exception as e:
+                logger.error(f"❌ Erreur boucle: {e}")
+                logger.error(traceback.format_exc())
+                time.sleep(poll_interval)
+
+
+if __name__ == "__main__":
     try:
         worker = PureVolleyWorker()
         worker.run()
@@ -418,6 +374,3 @@ def main():
         logger.error(f"❌ Erreur fatale: {e}")
         logger.error(traceback.format_exc())
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
