@@ -17,6 +17,19 @@ COPY ml_manager/ ./ml_manager/
 COPY analyze_video.py .
 COPY api_server.py .
 
+# Télécharger les poids des modèles ML (VideoMAE + YOLO)
+# Google Drive ZIP ID: 1__zkTmGwZo2z0EgbJvC14I_3kOpgQx3o
+RUN python -c "\
+import gdown, zipfile, os; \
+os.makedirs('weights', exist_ok=True); \
+print('⬇️ Téléchargement des poids ML depuis Google Drive...'); \
+gdown.download(id='1__zkTmGwZo2z0EgbJvC14I_3kOpgQx3o', output='weights/all_weights.zip', quiet=False); \
+print('📦 Extraction...'); \
+zipfile.ZipFile('weights/all_weights.zip', 'r').extractall('weights'); \
+os.remove('weights/all_weights.zip'); \
+print('✅ Poids ML installés:'); \
+[print(f'  {p}') for p in sorted(str(x) for x in __import__('pathlib').Path('weights').rglob('*') if x.is_file())]"
+
 # Port (Railway injecte $PORT)
 ENV PORT=8000
 EXPOSE 8000

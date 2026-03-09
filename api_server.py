@@ -208,6 +208,45 @@ def health():
     }
 
 
+@app.get("/api/model-status")
+def model_status():
+    """Diagnostic: vérifie quels modèles ML sont disponibles."""
+    import os
+    from pathlib import Path
+
+    # Vérifier les fichiers weights
+    weights_dir = Path("weights")
+    weights_files = {}
+    if weights_dir.exists():
+        for f in sorted(weights_dir.rglob("*")):
+            if f.is_file():
+                weights_files[str(f)] = f.stat().st_size
+    
+    # Vérifier les modèles chargés (si déjà initialisé)
+    models_loaded = {}
+    if VolleyballAnalyzer is not None:
+        models_loaded["VolleyballAnalyzer"] = "imported"
+    else:
+        models_loaded["VolleyballAnalyzer"] = "not_imported_yet (lazy)"
+
+    # Essayer de charger le MLManager pour vérifier les modèles
+    try:
+        from ml_manager import MLManager
+        from ml_manager.settings import ModelWeightsConfig
+        availability = ModelWeightsConfig.check_weights_availability()
+        models_loaded["weights_availability"] = availability
+    except Exception as e:
+        models_loaded["weights_check_error"] = str(e)
+
+    return {
+        "weights_directory_exists": weights_dir.exists(),
+        "weights_files_count": len(weights_files),
+        "weights_files": weights_files,
+        "models": models_loaded,
+        "cwd": os.getcwd(),
+    }
+
+
 @app.post("/api/analyze")
 async def start_analysis_endpoint(request: Request):
     """
