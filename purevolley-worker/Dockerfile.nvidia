@@ -1,0 +1,50 @@
+# Dockerfile.nvidia - Pour hébergement sur RunPod/Vast.ai avec GPU NVIDIA
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+# Variables d'environnement
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Installation des dépendances système
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    git \
+    wget \
+    curl \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Installation de PyTorch avec CUDA 12.1
+RUN pip3 install --no-cache-dir \
+    torch==2.3.0 \
+    torchvision==0.18.0 \
+    torchaudio==2.3.0 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Installation des autres dépendances
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Installation d'OpenCV avec support GPU
+RUN pip3 install --no-cache-dir \
+    opencv-python-headless==4.10.0.84 \
+    opencv-contrib-python-headless==4.10.0.84
+
+# Copie du code
+COPY . /app
+WORKDIR /app
+
+# Création d'un utilisateur non-root pour sécurité
+RUN useradd -m -u 1000 worker && \
+    chown -R worker:worker /app
+USER worker
+
+# Commande par défaut
+CMD ["python3", "worker.py"]
