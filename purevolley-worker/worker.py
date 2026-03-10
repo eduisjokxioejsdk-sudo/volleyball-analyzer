@@ -154,27 +154,52 @@ class PureVolleyWorker:
         except Exception as e:
             logger.error(f"❌ Erreur update Supabase: {e}")
 
+    def _extract_s3_key(self, video_url: str) -> str:
+        """Extrait la clé S3 depuis une URL presignée ou un chemin S3."""
+        if not video_url.startswith('http'):
+            return video_url  # Déjà une clé S3
+
+        # Extraire la clé depuis l'URL presignée Wasabi
+        # Format: https://s3.eu-west-2.wasabisys.com/courtvision/user-id/timestamp-file.mp4?X-Amz-...
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(video_url)
+        path = unquote(parsed.path)  # /courtvision/user-id/timestamp-file.mp4
+
+        # Retirer le bucket du path si présent
+        bucket = self.wasabi_bucket
+        if path.startswith(f'/{bucket}/'):
+            return path[len(f'/{bucket}/'):]
+        elif path.startswith('/'):
+            return path[1:]
+        return path
+
     def download_video(self, video_url: str, local_path: Path) -> bool:
-        """Télécharge une vidéo depuis Wasabi S3 ou URL directe."""
+        """Télécharge une vidéo depuis Wasabi S3 (génère une URL fraîche)."""
         try:
-            if video_url.startswith('http'):
-                # Téléchargement depuis URL (presigned URL ou URL directe)
-                logger.info(f"⬇️ Téléchargement depuis URL: {video_url[:80]}...")
-                r = requests.get(video_url, stream=True, timeout=600)
-                r.raise_for_status()
-                with open(local_path, 'wb') as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
-            else:
-                # Clé S3 directe
-                logger.info(f"⬇️ Téléchargement depuis S3: {video_url}")
-                self.s3_client.download_file(self.wasabi_bucket, video_url, str(local_path))
+            # Toujours extraire la clé S3 et télécharger directement via boto3
+            s3_key = self._extract_s3_key(video_url)
+            logger.info(f"⬇️ Téléchargement S3: bucket={self.wasabi_bucket}, key={s3_key}")
+            self.s3_client.download_file(self.wasabi_bucket, s3_key, str(local_path))
 
             size_mb = local_path.stat().st_size / (1024 * 1024)
             logger.info(f"✅ Vidéo téléchargée: {size_mb:.1f} MB")
             return True
         except Exception as e:
-            logger.error(f"❌ Erreur téléchargement: {e}")
+            logger.error(f"❌ Erreur téléchargement S3: {e}")
+            # Fallback: essayer l'URL directement (si pas expirée)
+            if video_url.startswith('http'):
+                try:
+                    logger.info("🔄 Fallback: téléchargement via URL directe...")
+                    r = requests.get(video_url, stream=True, timeout=600)
+                    r.raise_for_status()
+                    with open(local_path, 'wb') as f:
+                        for chunk in r.iter_content(8192):
+                            f.write(chunk)
+                    size_mb = local_path.stat().st_size / (1024 * 1024)
+                    logger.info(f"✅ Vidéo téléchargée (URL directe): {size_mb:.1f} MB")
+                    return True
+                except Exception as e2:
+                    logger.error(f"❌ Fallback URL aussi échoué: {e2}")
             return False
 
     def run_analysis(self, video_path: Path, video_data: Dict) -> List[Dict]:
